@@ -4,21 +4,22 @@ These observations come from the synthetic historical claims, verified visits an
 
 ## D09 · Billed units exceed verified time
 
-- **Observed:** For 192 of 260 D09 flags, the billed time was less than 30 minutes above the verified visit duration. For 172 of those 192 (89.6%), rounding up to a 15- or 30-minute boundary reproduced the submitted units exactly. That is consistent with rounding as an explanation.
-- **Proposed change:** Recalculate small discrepancies automatically from verified minutes using the payer’s rule. Show the change in the draft and rerun the remaining checks before release. Apply the under-30-minute cutoff to the gap from raw EVV time.
-- **Larger gaps:** They tended to cluster near an hour. Among the 66 claims more than 30 minutes above verified time, 45 were within ten minutes of an hour. Some fit whole-hour rounding. For gaps of 30 minutes or more, ask the agency to reconcile the billed time with the visit and check for any additional service or time recorded elsewhere.
+- **Observed:** For 55% of claims, the billed time was less than 15 minutes above verified time. For 73.8%, it was less than 30 minutes above verified time. Of the claims with a gap of less than 30 minutes, 89.6% matched rounding up to a 15- or 30-minute boundary. That is consistent with rounding as an explanation.
+- **Proposed change:** Where the gap between billed time and verified EVV time is less than 30 minutes, recalculate the correct number of billed units based on the payer’s rules, automatically update the claim, and notify the claimant.
+- **Larger gaps:** Gaps of more than 30 minutes should be confirmed with claimants. These gaps seem to cluster around an hour. 
+
 
 ## D06 · Harbor daily cap
 
-- **Observed:** 96 of 106 flags exceeded the 32-unit cap by exactly four units. Of those 96, 93 matched a single EVV visit and none matched multiple visits. In 84 cases, one verified visit supported all 36 units.
-- **Hypothesis:** A recorded nine-hour span could include a one-hour non-billable break. Subtracting a documented hour would bring those 84 visits within 32 units. The EVV export has no break field, so the agency would need to check the shift or timesheet.
-- **Proposed change:** Show the units available under the cap and let the agency confirm a reduction, then check the reduced claim again.
+- **Observed:** 96 of 106 flags exceeded the 32-unit cap by exactly four units. Of those 96, 93 matched a single EVV visit and none matched multiple visits.
+- **Hypothesis:** A recorded nine-hour span could include a one-hour lunch break. 
+- **Proposed change:** Add a non-billable break field to EVV and use it to appropriately bill claims.
 
 ## D07 and D08 · Authorization selection
 
-- **D07:** All 84 flags for a missing ID had exactly one authorization matching payer, patient, service and service date. Filling it cleared all D07 flags. Of those, 61 passed every check.
-- **D08:** All 80 flags used an authorization for the correct payer, patient and service but the wrong date window. In 47 cases the authorization had yet to start. In 33 it had expired. All 80 had a unique replacement for the service date. Replacing it cleared D08 in every case, and 55 passed every check.
-- **Proposed change:** Set the ID automatically when there is one match, then check available units. Send missing or ambiguous matches to review.
+- **D07:** All 84 flags for a missing ID had exactly one authorization matching payer, patient, service and service date. Filling it cleared all D07 flags. 
+- **D08:** All 80 flags used an authorization for the correct payer, patient and service but the wrong date window. All 80 claims had exactly one matching replacement, and replacing the ID cleared D08 in every case.
+- **Proposed change:** Suggest setting the correct ID automatically when there is one match. If there's many or none, flag for review. 
 
 ## Hypotheses tested
 
