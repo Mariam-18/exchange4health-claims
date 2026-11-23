@@ -31,6 +31,18 @@ The synthetic history contains 3,862 rows and **3,830 unique claims**. Each row 
 
 The prediction matched the recorded outcome for **3,768 of 3,830 claims (98.38%)**. The checker missed **61** recorded denials and flagged **one** claim that was paid. Among the **1,038** claims both recorded and predicted as denied, the predicted denial code matched in **1,026 cases (98.84%)**. These figures describe a replay of the synthetic history used to develop the checker.
 
+### Recorded reasons for the 61 missed denials
+
+All **61** claims that the checker predicted as paid and the payer recorded as denied had code **`D99` (Other / referred for manual review)**. The recorded payer remarks break down as follows:
+
+| Payer remark | Claims |
+|---|---:|
+| Denied - contact payer | 32 |
+| Under review - see payer correspondence | 29 |
+| **Total** | **61** |
+
+The remarks refer the reader to the payer or its correspondence. The supplied history gives no more specific reason for these denials.
+
 To inspect individual predictions and failed checks, export the audit from the same data directory:
 
 ```bash
