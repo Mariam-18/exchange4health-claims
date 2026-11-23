@@ -1,0 +1,302 @@
+"""Build claims from verified EVV and replay the resulting submission stream."""
+
+import argparse
+import csv
+from collections import Counter, defaultdict
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+from checker.claim_checker import (
+    Claim,
+    HARBOR_WEEKEND_BULLETIN,
+    PAYER_IDS,
+    SUMMIT_WHOLE_HOUR_PERIOD,
+    History,
+    check_claim,
+    load_evidence,
+    read_rows,
+)
+
+# The synthetic export consistently implies these rates. Production should
+# get them, and the patient-to-agency assignment, from master data.
+SERVICE_RATES = {
+    "T1019": Decimal("6.10"),
+    "S5125": Decimal("5.40"),
+    "T1005": Decimal("4.80"),
+}
+HARBOR_DAILY_CAP = 32
+READY = "ready to submit"
+NEEDS_REVIEW = "needs review"
+CONFIRM_CAP_REDUCTION = "confirm Harbor reduction"
+CHECK_AUTHORIZATION = "check remaining authorization balance"
+RESOLVE_CHECKS = "resolve blocking checks"
+
+
+@dataclass
+class Draft:
+    claim: Claim
+    agency: str
+    visit_ids: tuple
+    verified_seconds: int
+    billed_amount: Decimal
+
+
+@dataclass
+class Decision:
+    status: str
+    action: str
+    failures: tuple
+    review: tuple
+    remaining_auth: int
+    remaining_harbor: int | None
+    proposed_units: int | None
+    released_units: int | None
+
+
+def construct(data_dir, authorizations, verified_seconds, agencies):
+    coverage = defaultdict(list)
+    for auth_id, auth in authorizations.items():
+        coverage[auth.patient_id, auth.service_code].append((auth_id, auth))
+
+    visits = defaultdict(list)
+    for row in read_rows(data_dir / "evv_visits.csv"):
+        if row["verification_status"] != "verified":
+            continue
+        start = datetime.fromisoformat(row["clock_in"])
+        end = datetime.fromisoformat(row["clock_out"])
+        key = row["patient_id"], row["service_code"].strip().upper(), start.date()
+        visits[key].append((row["visit_id"], end))
+
+    drafts = []
+    skipped = Counter()
+    summit_adjustments = 0
+    for (patient, service, service_date), records in sorted(visits.items()):
+        key = patient, service, service_date
+        candidates = [
+            (auth_id, auth)
+            for auth_id, auth in coverage[patient, service]
+            if auth.start_date <= service_date <= auth.end_date
+        ]
+        if len(candidates) != 1:
+            skipped["missing or ambiguous authorization"] += 1
+            continue
+        auth_id, auth = candidates[0]
+        if auth.payer not in PAYER_IDS or service not in SERVICE_RATES:
+            skipped["missing payer rules or service rate"] += 1
+            continue
+        if len(agencies.get(patient, ())) != 1:
+            skipped["missing or ambiguous agency assignment"] += 1
+            continue
+
+        seconds = verified_seconds[key]
+        units, remainder = divmod(seconds, 900)
+        if auth.payer == "PY01" and remainder >= 480:
+            units += 1
+        if auth.payer == "PY03" and SUMMIT_WHOLE_HOUR_PERIOD.includes(service_date):
+            summit_adjustments += int(units % 4 != 0)
+            units -= units % 4
+        if units <= 0:
+            skipped["no billable units"] += 1
+            continue
+
+        modifier = ""
+        if auth.payer == "PY02" and service == "T1019":
+            weekend = service_date.weekday() >= 5
+            modifier = "U3" if weekend and HARBOR_WEEKEND_BULLETIN.includes(service_date) else "U2"
+
+        # Simulate a daily run after the last visit clock-out. The export does
+        # not contain verification timestamps or actual filing times.
+        submission = max(end for _, end in records).date() + timedelta(days=1)
+        claim = Claim(
+            f"EVV-{len(drafts) + 1:05d}", auth.payer, patient, service,
+            service_date, submission, units, auth_id, modifier, "1", "",
+        )
+        drafts.append(Draft(
+            claim, next(iter(agencies[patient])), tuple(v for v, _ in records),
+            seconds, SERVICE_RATES[service] * units,
+        ))
+    return drafts, skipped, summit_adjustments
+
+
+def simulate(drafts, authorizations, verified_seconds, *, confirm_reductions=False):
+    """Gate generated claims, counting only releasable claims against limits."""
+    earlier = History()
+    empty_batch = History()
+    for draft in sorted(drafts, key=lambda d: (
+        d.claim.submission_date, d.claim.service_date, d.claim.patient_id,
+        d.claim.service_code, d.claim.claim_id,
+    )):
+        claim = draft.claim
+        failures, review = check_claim(claim, authorizations, verified_seconds, earlier, empty_batch)
+        remaining_auth = authorizations[claim.auth_id].units - earlier.authorization_units[claim.authorization_key]
+        remaining_harbor = None
+        proposed_units = None
+        released = None
+        status = NEEDS_REVIEW
+        action = RESOLVE_CHECKS
+
+        if claim.payer == "PY02":
+            remaining_harbor = max(0, HARBOR_DAILY_CAP - earlier.daily_units[claim.daily_key])
+
+        if not failures and not review:
+            status = READY
+            action = ""
+            released = claim
+        elif "D06" in failures and remaining_harbor:
+            proposed_units = remaining_harbor
+            reduced = replace(claim, units=proposed_units)
+            failures, review = check_claim(reduced, authorizations, verified_seconds, earlier, empty_batch)
+            if not failures and not review:
+                action = CONFIRM_CAP_REDUCTION
+                if confirm_reductions:
+                    status = READY
+                    action = ""
+                    released = reduced
+
+        if status == NEEDS_REVIEW and "D02" in failures:
+            action = CHECK_AUTHORIZATION
+        if released is not None:
+            earlier.add(released, count_units=True)
+        yield draft, Decision(
+            status, action, failures, review, remaining_auth, remaining_harbor,
+            proposed_units, released.units if released is not None else None,
+        )
+
+
+def write_csv(path, columns, rows):
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def experiment(data_dir, output_dir):
+    history = {r["claim_id"]: r for r in read_rows(data_dir / "claims_history.csv")}
+    by_key = defaultdict(list)
+    agencies = defaultdict(set)
+    for row in history.values():
+        claim = Claim.from_row(row)
+        by_key[claim.duplicate_key].append((claim, row))
+        agencies[claim.patient_id].add(row["agency_id"])
+
+    pending_keys = {
+        Claim.from_row(row).duplicate_key
+        for row in read_rows(data_dir / "claims_to_check.csv")
+    }
+    authorizations, verified_seconds = load_evidence(data_dir)
+    drafts, skipped, summit_adjustments = construct(data_dir, authorizations, verified_seconds, agencies)
+    generated = {draft.claim.duplicate_key for draft in drafts}
+    if len(generated) != len(drafts):
+        raise ValueError("Multiple generated claims share a payer/patient/service/date key")
+
+    results = []
+    counts = Counter()
+    actions_by_scenario = defaultdict(Counter)
+    confirmed_replay = simulate(drafts, authorizations, verified_seconds, confirm_reductions=True)
+    for (draft, decision), (confirmed_draft, confirmed) in zip(
+        simulate(drafts, authorizations, verified_seconds), confirmed_replay, strict=True,
+    ):
+        c = draft.claim
+        assert c.claim_id == confirmed_draft.claim.claim_id
+        observed = by_key.get(c.duplicate_key, ())
+        statuses = {row["status"] for _, row in observed}
+        if not statuses <= {"paid", "denied"}:
+            raise ValueError(f"Unknown historical outcome for {c.duplicate_key}")
+        verdict = "paid" if "paid" in statuses else "denied" if statuses else "no verdict"
+        counts["mixed history"] += len(statuses) > 1
+        same_terms_paid = [
+            old.claim_id for old, row in observed
+            if row["status"] == "paid" and old.units == c.units and old.auth_id == c.auth_id
+            and old.modifier.strip().upper() == c.modifier
+        ]
+        counts["same terms paid"] += bool(same_terms_paid)
+        counts["no verdict but pending"] += verdict == "no verdict" and c.duplicate_key in pending_keys
+        result = {
+            "claim_id": c.claim_id, "agency_id": draft.agency, "payer": c.payer,
+            "patient_id": c.patient_id, "service_code": c.service_code,
+            "date_of_service": c.service_date, "submitted_date": c.submission_date,
+            "units": c.units, "auth_id": c.auth_id, "modifier": c.modifier,
+            "frequency_code": c.frequency_code, "original_claim_id": c.original_claim_id,
+            "billed_amount": format(draft.billed_amount, ".2f"),
+            "visit_ids": "|".join(draft.visit_ids), "verified_minutes": draft.verified_seconds / 60,
+            "historical_verdict": verdict,
+            "historical_statuses": "|".join(sorted(statuses)),
+            "historical_claim_ids": "|".join(old.claim_id for old, _ in observed),
+            "exact_terms_paid_claim_ids": "|".join(same_terms_paid),
+            "pending_claim_exists": c.duplicate_key in pending_keys,
+        }
+        for scenario, outcome in (("before_confirmation", decision), ("if_confirmed", confirmed)):
+            counts[scenario, verdict, outcome.status] += 1
+            if outcome.action:
+                actions_by_scenario[scenario][outcome.action] += 1
+            result.update({
+                f"{scenario}_status": outcome.status,
+                f"{scenario}_action": outcome.action,
+                f"{scenario}_blocking_checks": "|".join(outcome.failures),
+                f"{scenario}_review_reasons": "|".join(outcome.review),
+                f"{scenario}_remaining_auth": outcome.remaining_auth,
+                f"{scenario}_remaining_harbor": outcome.remaining_harbor,
+                f"{scenario}_proposed_units": outcome.proposed_units,
+                f"{scenario}_released_units": outcome.released_units,
+                f"{scenario}_released_amount": (
+                    format(SERVICE_RATES[c.service_code] * outcome.released_units, ".2f")
+                    if outcome.released_units is not None else None
+                ),
+            })
+        results.append(result)
+
+    missed_paid = []
+    paid_keys = set()
+    for key, observed in by_key.items():
+        for claim, row in observed:
+            if row["status"] != "paid":
+                continue
+            paid_keys.add(key)
+            if key not in generated:
+                missed_paid.append({**row, "reason": (
+                    "no verified EVV" if claim.visit_key not in verified_seconds
+                    else "verified EVV found, but no draft for this payer"
+                )})
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_csv(output_dir / "constructed_claims.csv", list(results[0]), results)
+    write_csv(output_dir / "historical_paid_without_generated.csv", [*next(iter(history.values())), "reason"], missed_paid)
+    lines = [
+        f"Verified patient/service/date groups: {len(verified_seconds):,}",
+        f"Generated drafts: {len(drafts):,}",
+        f"Skipped groups: {dict(skipped)}",
+        f"Summit drafts adjusted to complete hours: {summit_adjustments:,}",
+        "",
+        "Historical service-key verdict | ready to submit | needs review | total",
+    ]
+    verdicts = ("paid", "denied", "no verdict")
+    for verdict in verdicts:
+        n = [counts["before_confirmation", verdict, status] for status in (READY, NEEDS_REVIEW)]
+        lines.append(f"{verdict} | " + " | ".join(f"{x:,}" for x in [*n, sum(n)]))
+    lines.extend(["", "Scenario: confirm every eligible Harbor reduction immediately",
+                  "Historical service-key verdict | ready to submit | needs review | total"])
+    for verdict in verdicts:
+        n = [counts["if_confirmed", verdict, status] for status in (READY, NEEDS_REVIEW)]
+        lines.append(f"{verdict} | " + " | ".join(f"{x:,}" for x in [*n, sum(n)]))
+    lines.extend([
+        "",
+        f"Generated keys with both paid and denied history: {counts['mixed history']:,}",
+        f"Generated drafts with a paid historical claim matching units, authorization and modifier: {counts['same terms paid']:,}",
+        f"No-verdict drafts with a pending claim for the same key: {counts['no verdict but pending']:,}",
+        f"Historical paid claim IDs with no generated draft: {len(missed_paid):,}",
+        f"Historical paid service keys with no generated draft: {len(paid_keys - generated):,} of {len(paid_keys):,}",
+        f"Review actions before confirmations: {dict(actions_by_scenario['before_confirmation'])}",
+        f"Review actions with immediate confirmations: {dict(actions_by_scenario['if_confirmed'])}",
+    ])
+    summary = "\n".join(lines) + "\n"
+    (output_dir / "results.txt").write_text(summary, encoding="utf-8")
+    print(summary, end="")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("data_dir", type=Path)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args()
+    experiment(args.data_dir, args.output_dir)
