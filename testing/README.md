@@ -41,6 +41,17 @@ python -m checker.claim_checker /path/to/data --audit history_audit.csv
 
 The [drafter](../drafter/claim_drafter.py) generates claims from verified visits and evaluates them with the shared checker. The outcome is readiness for submission. The historical match joins on payer, patient, service, and date of service.
 
+### Historical denial and draft review rates
+
+The drafter produced **4,980 drafts**, of which **3,619 (72.7%)** matched a historical claim for the same payer, patient, service, and date of service.
+
+| Comparison | Historical denial rate | Draft review rate before confirmation |
+|---|---:|---:|
+| Overall | 1,099 of 3,830 historical claims (28.7%) | 345 of 4,980 drafts (6.9%) |
+| Same 3,619 matched services | 888 of 3,619 had only denied claims (24.5%) | 255 of 3,619 drafts (7.0%) |
+
+The matched comparison uses the same services on both sides. Where a service had a paid original and a later denied duplicate, it counts as historically paid. The draft review rate measures drafts the checker would hold before submission in the draft-only replay. Actual payer outcomes for the generated drafts are unavailable.
+
 Run from the repository root:
 
 ```bash
