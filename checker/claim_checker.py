@@ -1,11 +1,14 @@
 """Replay the Exchange4Health history with the supplied payer rules.
 
-Run: python claim_checker.py /path/to/data-pack
-Optional: --audit /path/to/history_audit.csv
+Run: python -m checker.claim_checker /path/to/data-pack
+Optional: --audit history_audit.csv --predictions predictions.csv
 
 The replay uses earlier recorded payments plus earlier pending claims forecast
-to pay when reconstructing authorization balances. Only history is scored.
+to pay when reconstructing authorization balances and Harbor daily totals.
+History is scored; pending claims get predictions.
 """
+
+from __future__ import annotations
 
 import argparse
 import csv
@@ -128,6 +131,7 @@ class History:
         self.submissions = Counter()
         self.authorization_units = Counter()
         self.projected_authorization_units = Counter()
+        self.projected_daily_units = Counter()
         self.daily_units = Counter()
 
     def add(self, claim: Claim, *, count_units: bool) -> None:
@@ -236,7 +240,7 @@ def check_harbor(claim: Claim, earlier: History, same_day: History) -> CheckFlag
             failures.append("D04")
 
     key = claim.daily_key
-    earlier_units = earlier.daily_units[key]
+    earlier_units = earlier.daily_units[key] + earlier.projected_daily_units[key]
     if earlier_units + claim.units > 32:
         failures.append("D06")
     elif earlier_units + same_day.daily_units[key] > 32:
@@ -288,6 +292,21 @@ def check_claim(claim, authorizations, visit_seconds, earlier, same_day) -> Chec
 
 def replay(data_dir: Path, *, history_csv: Path | None = None):
     """Return the scored historical claims and the historical input row count."""
+    results, _, raw_count = replay_all(data_dir, history_csv=history_csv)
+    return results, raw_count
+
+
+def predict_pending(data_dir: Path) -> list[dict]:
+    """Return a prediction row for every claim in claims_to_check.csv, in file order."""
+    _, pending, _ = replay_all(data_dir)
+    return pending
+
+
+def replay_all(data_dir: Path, *, history_csv: Path | None = None):
+    """Replay history and pending claims in submission order.
+
+    Return (scored historical rows, pending prediction rows, historical input row count).
+    """
     authorizations, visit_seconds = load_evidence(data_dir)
     raw_rows = read_rows(history_csv if history_csv is not None else data_dir / "claims_history.csv")
     unique_rows = {tuple(row.items()): row for row in raw_rows}.values()
@@ -302,6 +321,7 @@ def replay(data_dir: Path, *, history_csv: Path | None = None):
 
     earlier = History()
     results = []
+    pending = {}
     for _, group in groupby(entries, key=lambda entry: entry[0].submission_date):
         batch = list(group)
         same_day = History()
@@ -312,16 +332,10 @@ def replay(data_dir: Path, *, history_csv: Path | None = None):
         projected_payments = []
         for claim, row in batch:
             failures, review = check_claim(claim, authorizations, visit_seconds, earlier, same_day)
-            if row is None:
-                if not failures:
-                    projected_payments.append(claim)
-                continue
-            results.append({
+            prediction = {
                 "claim_id": claim.claim_id,
                 "payer": claim.payer,
                 "submitted_date": claim.submission_date.isoformat(),
-                "actual_status": row["status"],
-                "actual_denial_code": row["denial_code"],
                 "predicted_status": "denied" if failures else "paid",
                 "predicted_denial_code": failures[0] if failures else "",
                 "failed_checks": "|".join(failures),
@@ -330,14 +344,25 @@ def replay(data_dir: Path, *, history_csv: Path | None = None):
                 "earlier_projected_auth_units": earlier.projected_authorization_units[
                     claim.authorization_key
                 ],
+            }
+            if row is None:
+                if not failures:
+                    projected_payments.append(claim)
+                pending[claim.claim_id] = prediction
+                continue
+            results.append({
+                **prediction,
+                "actual_status": row["status"],
+                "actual_denial_code": row["denial_code"],
             })
         # Update usage after the batch so it is available to later dates.
         for claim in projected_payments:
             earlier.projected_authorization_units[claim.authorization_key] += claim.units
+            earlier.projected_daily_units[claim.daily_key] += claim.units
         for claim, row in batch:
-            if row is not None:
-                earlier.add(claim, count_units=row["status"] == "paid")
-    return results, len(raw_rows)
+            earlier.add(claim, count_units=row is not None and row["status"] == "paid")
+    order = [row["claim_id"] for row in read_rows(data_dir / "claims_to_check.csv")]
+    return results, [pending[claim_id] for claim_id in order], len(raw_rows)
 
 
 def print_metrics(results, raw_count):
@@ -380,18 +405,34 @@ def print_metrics(results, raw_count):
     print(f"False negatives: {outcomes['denied', 'paid']} {dict(sorted(missed_codes.items()))}")
 
 
+def write_rows(path: Path, rows: list[dict], fieldnames: list[str] | None = None) -> None:
+    """Write rows to a CSV file, keeping only the given columns if supplied."""
+    fieldnames = fieldnames or list(rows[0])
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main() -> None:
-    """Read CLI options, run the historical audit and write its CSV."""
+    """Read CLI options, run the historical audit, and write the audit and prediction CSVs."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data_dir", type=Path)
     parser.add_argument("--audit", type=Path, default=Path("history_audit.csv"))
+    parser.add_argument(
+        "--predictions", type=Path, default=Path("predictions.csv"),
+        help="Where to write claim_id,status,denial_code for claims_to_check.csv.",
+    )
     args = parser.parse_args()
-    results, raw_count = replay(args.data_dir)
-    with args.audit.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(results[0]))
-        writer.writeheader()
-        writer.writerows(results)
+    results, pending, raw_count = replay_all(args.data_dir)
+    write_rows(args.audit, results)
+    write_rows(
+        args.predictions,
+        [{"claim_id": r["claim_id"], "status": r["predicted_status"],
+          "denial_code": r["predicted_denial_code"]} for r in pending],
+    )
     print_metrics(results, raw_count)
+    print(f"Wrote {len(pending)} pending predictions to {args.predictions}")
 
 
 if __name__ == "__main__":
