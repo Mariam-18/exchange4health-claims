@@ -136,6 +136,20 @@ class History:
         self.projected_daily_units = Counter()
         self.daily_units = Counter()
 
+    def snapshot(self) -> History:
+        """Copy the ledger so a same-date file can advance independently."""
+        state = History()
+        state.claim_ids = self.claim_ids.copy()
+        state.submissions = self.submissions.copy()
+        state.submission_records.update({
+            key: records.copy() for key, records in self.submission_records.items()
+        })
+        state.authorization_units = self.authorization_units.copy()
+        state.projected_authorization_units = self.projected_authorization_units.copy()
+        state.projected_daily_units = self.projected_daily_units.copy()
+        state.daily_units = self.daily_units.copy()
+        return state
+
     def add(self, claim: Claim, *, count_units: bool, recorded_status: str | None = None) -> None:
         """Record a submission and add its units to usage when requested."""
         self.claim_ids.add(claim.claim_id)
@@ -482,8 +496,16 @@ def predict_pending_assessments(data_dir: Path) -> list[dict]:
     return [row["assessment"] for row in pending]
 
 
+def record_submission(history, claim, status, *, predicted_paid):
+    """Apply a submission's recorded or projected usage to the replay ledger."""
+    history.add(claim, count_units=status == "paid", recorded_status=status)
+    if status is None and predicted_paid:
+        history.projected_authorization_units[claim.authorization_key] += claim.units
+        history.projected_daily_units[claim.daily_key] += claim.units
+
+
 def replay_all(data_dir: Path, *, history_csv: Path | None = None, include_details=False):
-    """Replay history and pending claims in submission order.
+    """Replay by date, breaking same-date ties in original row order within each CSV.
 
     Return (scored historical rows, pending prediction rows, historical input row count).
     """
@@ -504,61 +526,72 @@ def replay_all(data_dir: Path, *, history_csv: Path | None = None, include_detai
     results = []
     pending = {}
     for _, group in groupby(entries, key=lambda entry: entry[0].submission_date):
-        batch = list(group)
-        same_day = History()
-        # Count all submissions in the batch for the same-day review checks.
-        for claim, _ in batch:
-            same_day.add(claim, count_units=True)
+        recorded, unsubmitted = [], []
+        for claim, row in group:
+            (unsubmitted if row is None else recorded).append((claim, row))
 
-        projected_payments = []
-        for claim, row in batch:
-            details = {} if include_details and row is None else None
-            failures, review = check_claim(
-                claim, authorizations, visit_seconds, earlier, same_day, details=details,
-                matching_visits=visit_records.get(claim.visit_key, ()) if visit_records is not None else (),
-            )
-            prediction = {
-                "claim_id": claim.claim_id,
-                "payer": claim.payer,
-                "submitted_date": claim.submission_date.isoformat(),
-                "predicted_status": "denied" if failures else "paid",
-                "predicted_denial_code": failures[0] if failures else "",
-                "failed_checks": "|".join(failures),
-                "review_reasons": "|".join(review),
-                "earlier_recorded_auth_units": earlier.authorization_units[claim.authorization_key],
-                "earlier_projected_auth_units": earlier.projected_authorization_units[
-                    claim.authorization_key
-                ],
-            }
-            if row is None:
-                if not failures:
-                    projected_payments.append(claim)
-                if details is not None:
-                    prediction["assessment"] = {
-                        "claim_id": claim.claim_id, "payer": claim.payer,
-                        "service_code": claim.service_code,
-                        "service_date": claim.service_date.isoformat(),
-                        "submission_date": claim.submission_date.isoformat(),
-                        "status": "needs_review" if failures or review else "ready_to_submit",
-                        "predicted_denial_code": failures[0] if failures else None,
-                        "failed_checks": list(failures),
-                        "finding_details": {code: details[code] for code in failures},
-                        "review_reasons": list(review),
-                    }
-                pending[claim.claim_id] = prediction
-                continue
-            results.append({
-                **prediction,
-                "actual_status": row["status"],
-                "actual_denial_code": row["denial_code"],
-            })
-        # Update usage after the batch so it is available to later dates.
-        for claim in projected_payments:
-            earlier.projected_authorization_units[claim.authorization_key] += claim.units
-            earlier.projected_daily_units[claim.daily_key] += claim.units
-        for claim, row in batch:
-            status = row["status"] if row is not None else None
-            earlier.add(claim, count_units=status == "paid", recorded_status=status)
+        recorded_totals, pending_totals = History(), History()
+        for batch, totals in ((recorded, recorded_totals), (unsubmitted, pending_totals)):
+            for claim, _ in batch:
+                totals.add(claim, count_units=True)
+
+        # Each CSV sees its own earlier rows. The other file only informs review.
+        recorded_history = earlier.snapshot() if recorded and unsubmitted else earlier
+        deferred = []
+        for batch, file_history, other_totals in (
+            (recorded, recorded_history, pending_totals),
+            (unsubmitted, earlier, recorded_totals),
+        ):
+            for claim, row in batch:
+                same_day = other_totals.snapshot()
+                same_day.add(claim, count_units=True)
+                details = {} if include_details and row is None else None
+                failures, review = check_claim(
+                    claim, authorizations, visit_seconds, file_history, same_day, details=details,
+                    matching_visits=visit_records.get(claim.visit_key, ()) if visit_records is not None else (),
+                )
+                prediction = {
+                    "claim_id": claim.claim_id,
+                    "payer": claim.payer,
+                    "submitted_date": claim.submission_date.isoformat(),
+                    "predicted_status": "denied" if failures else "paid",
+                    "predicted_denial_code": failures[0] if failures else "",
+                    "failed_checks": "|".join(failures),
+                    "review_reasons": "|".join(review),
+                    "earlier_recorded_auth_units": file_history.authorization_units[claim.authorization_key],
+                    "earlier_projected_auth_units": file_history.projected_authorization_units[
+                        claim.authorization_key
+                    ],
+                }
+                status = row["status"] if row is not None else None
+                record_submission(file_history, claim, status, predicted_paid=not failures)
+                if file_history is not earlier:
+                    deferred.append((claim, status, not failures))
+
+                if row is None:
+                    if details is not None:
+                        prediction["assessment"] = {
+                            "claim_id": claim.claim_id, "payer": claim.payer,
+                            "service_code": claim.service_code,
+                            "service_date": claim.service_date.isoformat(),
+                            "submission_date": claim.submission_date.isoformat(),
+                            "status": "needs_review" if failures or review else "ready_to_submit",
+                            "predicted_denial_code": failures[0] if failures else None,
+                            "failed_checks": list(failures),
+                            "finding_details": {code: details[code] for code in failures},
+                            "review_reasons": list(review),
+                        }
+                    pending[claim.claim_id] = prediction
+                    continue
+                results.append({
+                    **prediction,
+                    "actual_status": row["status"],
+                    "actual_denial_code": row["denial_code"],
+                })
+
+        for claim, status, predicted_paid in deferred:
+            record_submission(earlier, claim, status, predicted_paid=predicted_paid)
+
     order = [row["claim_id"] for row in read_rows(data_dir / "claims_to_check.csv")]
     return results, [pending[claim_id] for claim_id in order], len(raw_rows)
 
