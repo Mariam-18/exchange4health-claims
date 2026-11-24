@@ -2,7 +2,7 @@
 
 The checker evaluates existing claims against verified visits, authorizations, submission history, and payer rules. Each applicable check runs, and the payer’s priority determines the predicted denial code.
 
-These diagrams show the target workflow. The current replay groups by submission date. The proposed tie-break assumption is that earlier rows within the same CSV were submitted first on that date. Row order cannot compare submissions from two different files. The claim output diagram includes the proposed structured evidence column.
+These diagrams show the target workflow. The replay sorts by submission date and assumes earlier rows in the same CSV were submitted first when dates tie. Same-date claims from the other CSV can trigger review when their sequence matters. The [claim evidence contract](../docs/CLAIM_EVIDENCE.md) describes the structured JSON output.
 
 For the runnable historical evaluation, see the [testing guide](../testing/README.md).
 
