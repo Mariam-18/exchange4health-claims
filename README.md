@@ -103,11 +103,19 @@ Put the data pack folder at `Resonance_assessment_day__confirmation_and_preparat
 export E4H_DATA_DIR="/path/to/data-pack"
 ```
 
-Run the app:
+Run the app from the repository root:
 
 ```bash
 .venv/bin/streamlit run app/streamlit_app.py
 ```
+
+Then open the website:
+
+1. Go to **http://localhost:8501** in your browser. It usually opens by itself.
+2. Pick an account: an agency (e.g. **Agency AG009**) or **Exchange4Health rules team**.
+3. Type any password and click **Sign in**. Sign-in is a mock for the prototype.
+
+To stop the app, press **Ctrl+C** in the terminal where it's running.
 
 Command line:
 
