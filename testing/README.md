@@ -61,11 +61,17 @@ In the draft-only run, the **345** needing review comprised **231** authorizatio
 
 ### Coverage against historical claims
 
-| Historical match | Drafts |
-|---|---:|
-| A paid claim exists | 2,731 |
-| Only denied claims exist | 888 |
-| No corresponding claim in history | 1,361 |
-| **Total** | **4,980** |
+The drafter generated **4,980 drafts**. The history contains **3,830 unique claims**. A draft matches history when the payer, patient, service, and date of service are the same.
 
-**3,619 drafts** matched a historical claim. The paid group includes **27** service keys with a paid original and a later denied duplicate. Of drafts without a historical match, **470** matched the pending claims file and **891** matched neither file. **All 2,731 historically paid claims had a corresponding draft.** The **181 historical claims without a draft** were all denied.
+| Recorded outcomes for the matching historical claims | Drafts |
+|---|---:|
+| Paid only | 2,704 |
+| Denied only | 888 |
+| Both paid and denied | 27 |
+| **Subtotal with a historical match** | **3,619** |
+| No corresponding claim in history | 1,361 |
+| **Total drafts** | **4,980** |
+
+In all **27** mixed cases, the original claim was paid and a later duplicate was denied. Of the **1,361** drafts without a historical match, **470** matched the pending claims file and **891** matched neither file.
+
+Looking from the historical side, **181 historical claims had no corresponding draft**. Of those, **0 were paid** and **181 were denied**.
