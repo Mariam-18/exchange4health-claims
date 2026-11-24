@@ -16,11 +16,12 @@ from checker.claim_checker import (
     NORTHWIND_FILING_BULLETIN,
     SUMMIT_WHOLE_HOUR_PERIOD,
     Claim,
+    load_evidence,
     parse_date,
     predict_pending_assessments,
     read_rows,
 )
-from drafter.claim_drafter import SERVICE_RATES
+from drafter.claim_drafter import SERVICE_RATES, construct
 
 PAYER_NAMES = {"PY01": "Northwind", "PY02": "Harbor", "PY03": "Summit"}
 SERVICE_NAMES = {"T1019": "personal care", "T1005": "respite", "S5125": "attendant care"}
@@ -89,7 +90,7 @@ class Finding:
     change: dict = field(default_factory=dict)
     choices: list[Choice] = field(default_factory=list)
     fix_text: str = ""  # e.g. "Change units from 20 to 19."
-    contact: str = ""  # "payer" or "agency" when the next step is to contact someone
+    contact: str = ""  # "payer" or "coordinator" (the agency's EVV coordinator) when someone needs contacting
 
     @property
     def label(self) -> str:
@@ -194,14 +195,14 @@ def describe(code: str, detail: dict, row: dict, payer: str) -> Finding:
     if code == "D01":
         visits = ev["matching_visits"]
         ids = ", ".join(v["visit_id"] for v in visits)
-        f.contact = "agency"
+        f.contact = "coordinator"
         if action == "locate_missing_visit":
             f.message = "No EVV visit was recorded for this patient, service and date."
-            f.next_step = "Ask the agency whether the visit happened and was clocked under another date or service."
+            f.next_step = "Check with the caregiver whether the visit happened and was clocked under another date or service."
             specific = "No visit at all was found for this claim."
         elif action == "review_rejected_visit":
             f.message = f"The EVV visit for this date ({ids}) was rejected."
-            f.next_step = "Ask the agency's EVV coordinator why it was rejected and whether it can be corrected."
+            f.next_step = "Ask the EVV coordinator why it was rejected and whether it can be corrected."
             specific = f"This claim's visit {ids} was rejected, so it doesn't count."
         elif action == "resolve_pending_verification":
             f.message = f"The EVV visit for this date ({ids}) was edited by hand and is awaiting verification."
@@ -292,15 +293,15 @@ def describe(code: str, detail: dict, row: dict, payer: str) -> Finding:
             f.auto, f.change = True, {"units": 32}
             f.message = f"The claim bills 36 units ({hours(36)}); Harbor pays at most 32 ({hours(32)}) per patient per day."
             f.fix_text = "Change units from 36 to 32."
-            f.next_step = "Notify the agency: the 9-hour visit may include an unpaid break."
+            f.next_step = "Follow-up: the 9-hour visit may include an unpaid break. Ask the caregiver to clock out for breaks."
         else:
             f.message = (
                 f"The claim bills {billed} units ({hours(billed)}), and {already} units ({hours(already)}) "
                 f"are already billed for this patient that day. Harbor pays at most 32 per day, so "
                 f"{plural(proposed or 0, 'unit')} would be paid."
             )
-            f.next_step = "Check the day's visits with the agency before reducing."
-            f.contact = "agency"
+            f.next_step = "Check the day's visits with the EVV coordinator before reducing."
+            f.contact = "coordinator"
         f.help = (
             "Harbor pays at most 32 units (8 hours) per patient per day, across all services. "
             + ("A single 9-hour visit is most likely an 8-hour shift with an unpaid break inside it."
@@ -352,10 +353,10 @@ def describe(code: str, detail: dict, row: dict, payer: str) -> Finding:
                     f.fix_text = (f"Change units from {billed} to {new_units}: {by_rules} by Summit's "
                                   "rounding, then down to whole hours.")
             f.auto, f.change = new_units > 0, {"units": new_units}
-            f.next_step = "Notify the agency that units were corrected to the payer's rounding rule."
+            f.next_step = "Follow-up: units were corrected to the payer's rounding rule."
         else:
-            f.next_step = "The gap is too large to be rounding. Ask the agency whether time is missing from EVV or the units are wrong."
-            f.contact = "agency"
+            f.next_step = "The gap is too large to be rounding. Ask the EVV coordinator whether time is missing from EVV or the units are wrong."
+            f.contact = "coordinator"
         f.help = (
             "Billed units can't exceed the verified visit time, converted to 15-minute units using "
             f"the payer's rounding rule. {UNIT_RULES[payer]} Gaps under 30 minutes are almost always "
@@ -369,11 +370,11 @@ def describe(code: str, detail: dict, row: dict, payer: str) -> Finding:
         if whole > 0:
             f.auto, f.change = True, {"units": whole}
             f.fix_text = f"Change units from {billed} to {whole} ({hours(whole)})."
-            f.next_step = "Notify the agency that units were rounded down to whole hours."
+            f.next_step = "Follow-up: units were rounded down to whole hours."
         else:
             f.message += " The verified visit is shorter than an hour."
-            f.next_step = "Confirm the visit with the agency."
-            f.contact = "agency"
+            f.next_step = "Confirm the visit with the EVV coordinator."
+            f.contact = "coordinator"
         f.help = (
             "Summit pays home care in whole hours (multiples of 4 units) for dates of service from "
             "1 July 2026. The fix rounds down to the largest whole number of hours that both the "
@@ -417,7 +418,7 @@ def contact_message(item: ReviewItem, finding: Finding) -> str:
     """Draft a short message to the payer or agency about one finding."""
     r = item.row
     service = SERVICE_NAMES.get(r["service_code"].strip().upper(), r["service_code"])
-    to = item.payer_name if finding.contact == "payer" else r["agency_id"]
+    to = item.payer_name if finding.contact == "payer" else "EVV coordinator"
     return (
         f"To: {to}\n"
         f"Re: claim {item.claim_id}, patient {r['patient_id']}, {service} on "
@@ -426,12 +427,20 @@ def contact_message(item: ReviewItem, finding: Finding) -> str:
     )
 
 
-def assess(data_dir: Path, rows: list[dict]) -> list[dict]:
-    """Run the checker on the given pending rows, keeping all other data files unchanged."""
+def assess(data_dir: Path, rows: list[dict], *, with_history: bool = True) -> list[dict]:
+    """Run the checker on the given pending rows, keeping the other data files unchanged.
+
+    with_history=False replays the rows on their own, as if they replaced the recorded claims.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        for name in ("claims_history.csv", "authorizations.csv", "evv_visits.csv"):
+        for name in ("authorizations.csv", "evv_visits.csv"):
             shutil.copy(data_dir / name, tmp_dir / name)
+        if with_history:
+            shutil.copy(data_dir / "claims_history.csv", tmp_dir / "claims_history.csv")
+        else:
+            header = (data_dir / "claims_history.csv").read_text(encoding="utf-8-sig").splitlines()[0]
+            (tmp_dir / "claims_history.csv").write_text(header + "\n", encoding="utf-8")
         with (tmp_dir / "claims_to_check.csv").open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
             writer.writeheader()
@@ -442,3 +451,36 @@ def assess(data_dir: Path, rows: list[dict]) -> list[dict]:
 def load_pending(data_dir: Path) -> list[dict]:
     """Return the rows of claims_to_check.csv in file order."""
     return read_rows(data_dir / "claims_to_check.csv")
+
+
+def build_drafts(data_dir: Path, agency: str, last_service_date: date):
+    """Draft claims from verified EVV for one agency, for dates of service up to the given date.
+
+    Output: (claim rows in submission order, list of (patient, service, date, reason) that couldn't be drafted).
+    Earlier dates are included so authorization balances and daily totals are correct.
+    """
+    agencies = {}
+    for row in read_rows(data_dir / "claims_history.csv"):
+        agencies.setdefault(row["patient_id"], set()).add(row["agency_id"])
+    authorizations, verified_seconds = load_evidence(data_dir)
+    drafts, skipped, _ = construct(data_dir, authorizations, verified_seconds, agencies)
+    visit_ids = {}
+    mine = [d for d in drafts if d.agency == agency and d.claim.service_date <= last_service_date]
+    mine.sort(key=lambda d: (d.claim.submission_date, d.claim.service_date, d.claim.patient_id, d.claim.service_code))
+    rows = []
+    for n, d in enumerate(mine, 1):
+        c = d.claim
+        rows.append({
+            "claim_id": f"DRAFT-{n:04d}", "agency_id": d.agency, "payer": c.payer,
+            "patient_id": c.patient_id, "service_code": c.service_code,
+            "date_of_service": c.service_date.isoformat(), "submitted_date": c.submission_date.isoformat(),
+            "units": str(c.units), "auth_id": c.auth_id, "modifier": c.modifier,
+            "frequency_code": "1", "original_claim_id": "", "billed_amount": f"{d.billed_amount:.2f}",
+            "visit_ids": "|".join(d.visit_ids),
+        })
+    failed = [
+        (patient, service, service_date, reason)
+        for (patient, service, service_date), owner, reason in skipped
+        if owner in ("", agency) and service_date <= last_service_date
+    ]
+    return rows, failed
