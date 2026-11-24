@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from itertools import groupby
 from pathlib import Path
 from typing import Optional
@@ -129,21 +130,23 @@ class History:
     def __init__(self):
         self.claim_ids = set()
         self.submissions = Counter()
+        self.submission_records = defaultdict(list)
         self.authorization_units = Counter()
         self.projected_authorization_units = Counter()
         self.projected_daily_units = Counter()
         self.daily_units = Counter()
 
-    def add(self, claim: Claim, *, count_units: bool) -> None:
+    def add(self, claim: Claim, *, count_units: bool, recorded_status: str | None = None) -> None:
         """Record a submission and add its units to usage when requested."""
         self.claim_ids.add(claim.claim_id)
         self.submissions[claim.duplicate_key] += 1
+        self.submission_records[claim.duplicate_key].append((claim, recorded_status))
         if count_units:
             self.authorization_units[claim.authorization_key] += claim.units
             self.daily_units[claim.daily_key] += claim.units
 
 
-def load_evidence(data_dir: Path):
+def load_evidence(data_dir: Path, *, visit_records: dict | None = None):
     """Return authorizations by ID and verified seconds by patient, service and date."""
     authorizations = {}
     for row in read_rows(data_dir / "authorizations.csv"):
@@ -155,24 +158,136 @@ def load_evidence(data_dir: Path):
 
     visit_seconds = defaultdict(int)
     for row in read_rows(data_dir / "evv_visits.csv"):
-        if row["verification_status"] == "verified":
-            clock_in = datetime.fromisoformat(row["clock_in"])
+        status = row["verification_status"]
+        if status != "verified" and visit_records is None:
+            continue
+        clock_in = datetime.fromisoformat(row["clock_in"])
+        key = row["patient_id"], row["service_code"].strip().upper(), clock_in.date()
+        if visit_records is not None:
+            visit_records.setdefault(key, []).append({
+                "visit_id": row["visit_id"], "verification_status": status,
+            })
+        if status == "verified":
             clock_out = datetime.fromisoformat(row["clock_out"])
-            key = row["patient_id"], row["service_code"].strip().upper(), clock_in.date()
             visit_seconds[key] += int((clock_out - clock_in).total_seconds())
     return authorizations, visit_seconds
 
 
 CheckFlags = tuple[tuple[str, ...], tuple[str, ...]]
+RULE_REFERENCES = {
+    "PY01": {
+        "evv": "Northwind provider manual, §4.2",
+        "units": "Northwind provider manual, §4.3",
+        "auth": "Northwind provider manual, §4.5",
+        "duplicate": "Northwind provider manual, §6.4",
+    },
+    "PY02": {
+        "evv": "Harbor provider guide, Visit verification",
+        "units": "Harbor provider guide, Visit verification",
+        "auth": "Harbor provider guide, Authorizations",
+        "duplicate": "Harbor provider guide, Duplicates",
+    },
+    "PY03": {
+        "evv": "Summit provider handbook, §9.1",
+        "units": "Summit provider handbook, §9.1",
+        "auth": "Summit provider handbook, §9.2",
+        "duplicate": "Summit provider handbook, §9.4",
+    },
+}
 
 
-def check_submission(claim: Claim, earlier: History, same_day: History) -> CheckFlags:
+def finding(details, code, reference, action, **evidence):
+    """Record supporting facts and the suggested action for a failed rule."""
+    if details is not None:
+        details[code] = {
+            "evidence": evidence, "rule_reference": reference, "suggested_action": action,
+        }
+
+
+def record_filing(details, claim, days, reference):
+    """Record the filing deadline and the number of days past it."""
+    deadline = claim.service_date + timedelta(days=days)
+    finding(
+        details, "D03", reference, "review_late_filing_options",
+        filing_limit_days=days, filing_deadline=deadline.isoformat(),
+        days_late=(claim.submission_date - deadline).days,
+    )
+
+
+def date_gap(service_date, authorization):
+    """Return the signed gap from inclusive coverage, or None for an unknown ID."""
+    if authorization is None:
+        return None
+    if service_date < authorization.start_date:
+        return (service_date - authorization.start_date).days
+    if service_date > authorization.end_date:
+        return (service_date - authorization.end_date).days
+    return 0
+
+
+def record_auth_match(details, claim, authorizations, submitted):
+    """Record why an authorization failed and any covering replacement."""
+    if details is None:
+        return
+    candidates = {
+        auth_id: auth for auth_id, auth in authorizations.items()
+        if auth_id != claim.auth_id and auth.covers(claim)
+    }
+    ids = sorted(candidates)
+    reference = RULE_REFERENCES[claim.payer]["auth"]
+    action = "resolve_authorization_match"
+    if not claim.auth_id:
+        if len(ids) == 1:
+            action = "apply_matching_authorization"
+        finding(details, "D07", reference, action, candidate_auth_ids=ids)
+        return
+
+    gap = date_gap(claim.service_date, submitted)
+    if submitted is None:
+        mismatches = ["unknown_id"]
+    else:
+        mismatches = [
+            f"wrong_{field}" for field in ("payer", "patient_id", "service_code")
+            if getattr(claim, field) != getattr(submitted, field)
+        ]
+        if gap:
+            mismatches.append("date_outside_coverage")
+    unique_coverage = None
+    if len(ids) == 1:
+        candidate = candidates[ids[0]]
+        unique_coverage = {
+            "start_date": candidate.start_date.isoformat(),
+            "end_date": candidate.end_date.isoformat(),
+        }
+        action = "replace_authorization"
+    finding(
+        details, "D08", reference, action, submitted_auth_id=claim.auth_id,
+        mismatches=mismatches,
+        authorization_start_date=submitted.start_date.isoformat() if submitted else None,
+        authorization_end_date=submitted.end_date.isoformat() if submitted else None,
+        coverage_date_gap_days=gap, candidate_auth_ids=ids,
+        unique_candidate_coverage=unique_coverage,
+    )
+
+
+def check_submission(claim: Claim, earlier: History, same_day: History, *, details=None) -> CheckFlags:
     """Check submission type against prior and same-day claims.
 
     Return a pair of tuples containing denial codes and review reasons.
     """
     if claim.frequency_code == "1":
         if earlier.submissions[claim.duplicate_key]:
+            if details is not None:
+                matches = [
+                    {"claim_id": old.claim_id, "submission_date": old.submission_date.isoformat(),
+                     "recorded_status": status}
+                    for old, status in earlier.submission_records[claim.duplicate_key]
+                ]
+                finding(
+                    details, "D05", RULE_REFERENCES[claim.payer]["duplicate"],
+                    "review_prior_submission", frequency_code=claim.frequency_code,
+                    matching_submissions=matches,
+                )
             return ("D05",), ()
         if same_day.submissions[claim.duplicate_key] > 1:
             return (), ("Same-day duplicate order",)
@@ -184,26 +299,49 @@ def check_submission(claim: Claim, earlier: History, same_day: History) -> Check
     return (), ()
 
 
-def check_visit(claim: Claim, verified_seconds: int | None) -> CheckFlags:
+def check_visit(claim: Claim, verified_seconds: int | None, *, details=None, matching_visits=()) -> CheckFlags:
     """Compare billed units with verified visit time. Return codes and review reasons."""
     if verified_seconds is None:
+        statuses = {row["verification_status"] for row in matching_visits}
+        if not statuses:
+            action = "locate_missing_visit"
+        elif statuses == {"rejected"}:
+            action = "review_rejected_visit"
+        elif statuses == {"manual_edit_pending"}:
+            action = "resolve_pending_verification"
+        else:
+            action = "review_visit_statuses"
+        finding(details, "D01", RULE_REFERENCES[claim.payer]["evv"], action,
+                matching_visits=list(matching_visits))
         return ("D01",), ()
 
     supported_units, remainder = divmod(verified_seconds, 15 * 60)
     if claim.payer == "PY01" and remainder >= 8 * 60:
         supported_units += 1
     if claim.units > supported_units:
+        excess = claim.units - supported_units
+        gap = claim.units * 15 - verified_seconds / 60
+        action = "check_rounding" if gap < 30 else "reconcile_visit_and_billed_units"
+        finding(
+            details, "D09", RULE_REFERENCES[claim.payer]["units"], action,
+            verified_minutes=verified_seconds / 60, billed_units=claim.units,
+            supported_units=supported_units, excess_units=excess,
+            excess_billable_minutes=excess * 15, gap_vs_evv_minutes=gap,
+        )
         return ("D09",), ()
     return (), ()
 
 
 def check_authorization(
     claim: Claim, authorization: Authorization | None, earlier: History, same_day: History,
+    *, details=None, authorizations=None,
 ) -> CheckFlags:
     """Check the supplied authorization and available units. Return codes and review reasons."""
     if not claim.auth_id:
+        record_auth_match(details, claim, authorizations or {}, authorization)
         return ("D07",), ()
     if authorization is None or not authorization.covers(claim):
+        record_auth_match(details, claim, authorizations or {}, authorization)
         return ("D08",), ()
 
     key = claim.authorization_key
@@ -213,22 +351,32 @@ def check_authorization(
         - earlier.projected_authorization_units[key]
     )
     if claim.units > remaining:
+        finding(
+            details, "D02", RULE_REFERENCES[claim.payer]["auth"],
+            "review_authorization_balance", auth_id=claim.auth_id,
+            authorized_units=authorization.units, recorded_paid_units=earlier.authorization_units[key],
+            projected_paid_units=earlier.projected_authorization_units[key],
+            remaining_units=remaining, requested_units=claim.units,
+            shortfall_units=claim.units - max(0, remaining),
+        )
         return ("D02",), ()
     if same_day.authorization_units[key] > remaining:
         return (), ("Same-day authorization balance",)
     return (), ()
 
 
-def check_northwind(claim: Claim) -> CheckFlags:
+def check_northwind(claim: Claim, *, details=None) -> CheckFlags:
     """Apply the Northwind filing window to the claim. Return codes and review reasons."""
     elapsed = (claim.submission_date - claim.service_date).days
     filing_limit = 45 if NORTHWIND_FILING_BULLETIN.includes(claim.service_date) else 30
     if elapsed > filing_limit:
+        reference = "Northwind Provider Bulletin 2026-07" if filing_limit == 45 else "Northwind provider manual, §6.1"
+        record_filing(details, claim, filing_limit, reference)
         return ("D03",), ()
     return (), ()
 
 
-def check_harbor(claim: Claim, earlier: History, same_day: History) -> CheckFlags:
+def check_harbor(claim: Claim, earlier: History, same_day: History, *, details=None) -> CheckFlags:
     """Check the Harbor modifier and daily units. Return codes and review reasons."""
     failures = []
     review = []
@@ -238,39 +386,61 @@ def check_harbor(claim: Claim, earlier: History, same_day: History) -> CheckFlag
         modifier = "U3" if weekend_override else "U2"
         if claim.modifier != modifier:
             failures.append("D04")
+            reference = "Harbor Provider Notice 2026-08" if HARBOR_WEEKEND_BULLETIN.includes(claim.service_date) else "Harbor provider guide, Modifiers"
+            finding(details, "D04", reference, "apply_expected_modifier",
+                    submitted_modifier=claim.modifier, expected_modifier=modifier)
 
     key = claim.daily_key
     earlier_units = earlier.daily_units[key] + earlier.projected_daily_units[key]
     if earlier_units + claim.units > 32:
         failures.append("D06")
+        available = max(0, 32 - earlier_units)
+        action = "confirm_cap_reduction" if available else "review_daily_cap"
+        finding(
+            details, "D06", "Harbor provider guide, Daily maximum", action,
+            daily_cap_units=32, already_counted_units=earlier_units, billed_units=claim.units,
+            excess_units=earlier_units + claim.units - 32, available_units=available,
+            proposed_units=available or None,
+        )
     elif earlier_units + same_day.daily_units[key] > 32:
         review.append("Same-day Harbor daily cap")
     return tuple(failures), tuple(review)
 
 
-def check_summit(claim: Claim) -> CheckFlags:
+def check_summit(claim: Claim, *, details=None, verified_seconds=None) -> CheckFlags:
     """Apply Summit filing and unit increment rules. Return codes and review reasons."""
     failures = []
     elapsed = (claim.submission_date - claim.service_date).days
     if elapsed > 60:
         failures.append("D03")
+        record_filing(details, claim, 60, "Summit provider handbook, §9.3")
     if SUMMIT_WHOLE_HOUR_PERIOD.includes(claim.service_date) and claim.units % 4:
         failures.append("D10")
+        finding(
+            details, "D10", "Summit Amendment 3 (inferred, effective 2026-07-01)",
+            "review_whole_hour_units", billed_units=claim.units, required_unit_multiple=4,
+            remainder_units=claim.units % 4,
+            verified_minutes=None if verified_seconds is None else verified_seconds / 60,
+            evv_units_exact=None if verified_seconds is None else verified_seconds / 900,
+            evv_supported_units=None if verified_seconds is None else verified_seconds // 900,
+        )
     return tuple(failures), ()
 
 
-def check_payer_rules(claim: Claim, earlier: History, same_day: History) -> CheckFlags:
+def check_payer_rules(claim: Claim, earlier: History, same_day: History, *,
+                      details=None, verified_seconds=None) -> CheckFlags:
     """Dispatch a supported payer's checks. Return codes and review reasons."""
     if claim.payer == "PY01":
-        return check_northwind(claim)
+        return check_northwind(claim, details=details)
     if claim.payer == "PY02":
-        return check_harbor(claim, earlier, same_day)
+        return check_harbor(claim, earlier, same_day, details=details)
     if claim.payer == "PY03":
-        return check_summit(claim)
+        return check_summit(claim, details=details, verified_seconds=verified_seconds)
     return (), ("Unknown payer",)
 
 
-def check_claim(claim, authorizations, visit_seconds, earlier, same_day) -> CheckFlags:
+def check_claim(claim, authorizations, visit_seconds, earlier, same_day, *,
+                details=None, matching_visits=()) -> CheckFlags:
     """Check a claim against authorization, EVV and submission lookups.
 
     Return all failed codes in priority order and all review reasons.
@@ -278,11 +448,15 @@ def check_claim(claim, authorizations, visit_seconds, earlier, same_day) -> Chec
     if claim.payer not in PAYER_IDS:
         return (), ("Unknown payer",)
 
+    seconds = visit_seconds.get(claim.visit_key)
     checks = (
-        check_submission(claim, earlier, same_day),
-        check_visit(claim, visit_seconds.get(claim.visit_key)),
-        check_authorization(claim, authorizations.get(claim.auth_id), earlier, same_day),
-        check_payer_rules(claim, earlier, same_day),
+        check_submission(claim, earlier, same_day, details=details),
+        check_visit(claim, seconds, details=details, matching_visits=matching_visits),
+        check_authorization(
+            claim, authorizations.get(claim.auth_id), earlier, same_day,
+            details=details, authorizations=authorizations,
+        ),
+        check_payer_rules(claim, earlier, same_day, details=details, verified_seconds=seconds),
     )
     failures = {code for codes, _ in checks for code in codes}
     review = tuple(reason for _, reasons in checks for reason in reasons)
@@ -302,12 +476,19 @@ def predict_pending(data_dir: Path) -> list[dict]:
     return pending
 
 
-def replay_all(data_dir: Path, *, history_csv: Path | None = None):
+def predict_pending_assessments(data_dir: Path) -> list[dict]:
+    """Return interface-ready assessments for pending claims in file order."""
+    _, pending, _ = replay_all(data_dir, include_details=True)
+    return [row["assessment"] for row in pending]
+
+
+def replay_all(data_dir: Path, *, history_csv: Path | None = None, include_details=False):
     """Replay history and pending claims in submission order.
 
     Return (scored historical rows, pending prediction rows, historical input row count).
     """
-    authorizations, visit_seconds = load_evidence(data_dir)
+    visit_records = {} if include_details else None
+    authorizations, visit_seconds = load_evidence(data_dir, visit_records=visit_records)
     raw_rows = read_rows(history_csv if history_csv is not None else data_dir / "claims_history.csv")
     unique_rows = {tuple(row.items()): row for row in raw_rows}.values()
     entries = [(Claim.from_row(row), row) for row in unique_rows]
@@ -331,7 +512,11 @@ def replay_all(data_dir: Path, *, history_csv: Path | None = None):
 
         projected_payments = []
         for claim, row in batch:
-            failures, review = check_claim(claim, authorizations, visit_seconds, earlier, same_day)
+            details = {} if include_details and row is None else None
+            failures, review = check_claim(
+                claim, authorizations, visit_seconds, earlier, same_day, details=details,
+                matching_visits=visit_records.get(claim.visit_key, ()) if visit_records is not None else (),
+            )
             prediction = {
                 "claim_id": claim.claim_id,
                 "payer": claim.payer,
@@ -348,6 +533,18 @@ def replay_all(data_dir: Path, *, history_csv: Path | None = None):
             if row is None:
                 if not failures:
                     projected_payments.append(claim)
+                if details is not None:
+                    prediction["assessment"] = {
+                        "claim_id": claim.claim_id, "payer": claim.payer,
+                        "service_code": claim.service_code,
+                        "service_date": claim.service_date.isoformat(),
+                        "submission_date": claim.submission_date.isoformat(),
+                        "status": "needs_review" if failures or review else "ready_to_submit",
+                        "predicted_denial_code": failures[0] if failures else None,
+                        "failed_checks": list(failures),
+                        "finding_details": {code: details[code] for code in failures},
+                        "review_reasons": list(review),
+                    }
                 pending[claim.claim_id] = prediction
                 continue
             results.append({
@@ -360,7 +557,8 @@ def replay_all(data_dir: Path, *, history_csv: Path | None = None):
             earlier.projected_authorization_units[claim.authorization_key] += claim.units
             earlier.projected_daily_units[claim.daily_key] += claim.units
         for claim, row in batch:
-            earlier.add(claim, count_units=row is not None and row["status"] == "paid")
+            status = row["status"] if row is not None else None
+            earlier.add(claim, count_units=status == "paid", recorded_status=status)
     order = [row["claim_id"] for row in read_rows(data_dir / "claims_to_check.csv")]
     return results, [pending[claim_id] for claim_id in order], len(raw_rows)
 
@@ -423,8 +621,12 @@ def main() -> None:
         "--predictions", type=Path, default=Path("predictions.csv"),
         help="Where to write claim_id,status,denial_code for claims_to_check.csv.",
     )
+    parser.add_argument("--details", type=Path, help="Write pending assessments as a JSON array.")
     args = parser.parse_args()
-    results, pending, raw_count = replay_all(args.data_dir)
+    results, pending, raw_count = replay_all(args.data_dir, include_details=args.details is not None)
+    if args.details is not None:
+        assessments = [row["assessment"] for row in pending]
+        args.details.write_text(json.dumps(assessments, indent=2) + "\n", encoding="utf-8")
     write_rows(args.audit, results)
     write_rows(
         args.predictions,
