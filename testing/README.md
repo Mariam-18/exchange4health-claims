@@ -36,3 +36,36 @@ To inspect individual predictions and failed checks, export the audit from the s
 ```bash
 python -m checker.claim_checker /path/to/data --audit history_audit.csv
 ```
+
+## Claim drafter testing
+
+The [drafter](../drafter/claim_drafter.py) generates claims from verified visits and evaluates them with the shared checker. The outcome is readiness for submission. The historical match joins on payer, patient, service, and date of service.
+
+Run from the repository root:
+
+```bash
+python -m drafter.claim_drafter /path/to/data --output-dir /path/to/draft_results
+python -m drafter.claim_drafter /path/to/data --check-history --output-dir /path/to/history_check_results
+```
+
+### Current run on the synthetic data
+
+Both modes generated **4,980 drafts**. The draft-only run reproduced the earlier **4,635 ready** and **345 needing review**. The second mode includes recorded submissions in the duplicate and usage checks.
+
+| Mode | Ready before confirmation | Needs review before confirmation | Ready if all eligible reductions are confirmed | Needs review after confirmation |
+|---|---:|---:|---:|---:|
+| Draft-only replay | 4,635 | 345 | 4,736 | 244 |
+| Check against recorded submissions | 4,020 | 960 | 4,095 | 885 |
+
+In the draft-only run, the **345** needing review comprised **231** authorization shortfalls and **114** Harbor reduction requests. In the immediate-confirmation simulation, **113** Harbor drafts passed with fewer units. Those releases used authorization capacity that some later drafts needed.
+
+### Coverage against historical claims
+
+| Historical match | Drafts |
+|---|---:|
+| A paid claim exists | 2,731 |
+| Only denied claims exist | 888 |
+| No corresponding claim in history | 1,361 |
+| **Total** | **4,980** |
+
+**3,619 drafts** matched a historical claim. The paid group includes **27** service keys with a paid original and a later denied duplicate. Of drafts without a historical match, **470** matched the pending claims file and **891** matched neither file. **All 2,731 historically paid claims had a corresponding draft.** The **181 historical claims without a draft** were all denied.
