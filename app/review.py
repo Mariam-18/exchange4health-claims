@@ -13,8 +13,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from checker.claim_checker import (
-    NORTHWIND_FILING_BULLETIN,
-    SUMMIT_WHOLE_HOUR_PERIOD,
+    filing_limit,
+    whole_hour_rule,
     Claim,
     load_evidence,
     parse_date,
@@ -153,13 +153,8 @@ def merge_changes(findings) -> dict:
 
 def filing_deadline(claim: Claim) -> date | None:
     """Return the payer's filing deadline for the claim, or None when no limit applies."""
-    if claim.payer == "PY01":
-        days = 45 if NORTHWIND_FILING_BULLETIN.includes(claim.service_date) else 30
-    elif claim.payer == "PY03":
-        days = 60
-    else:
-        return None
-    return claim.service_date + timedelta(days=days)
+    limit = filing_limit(claim.payer, claim.service_date)
+    return None if limit is None else claim.service_date + timedelta(days=limit[0])
 
 
 def long_date(value: str) -> str:
@@ -347,7 +342,7 @@ def describe(code: str, detail: dict, row: dict, payer: str) -> Finding:
         if action == "check_rounding":
             new_units = by_rules
             f.fix_text = f"Change units from {billed} to {by_rules}."
-            if payer == "PY03" and SUMMIT_WHOLE_HOUR_PERIOD.includes(date.fromisoformat(service_date)):
+            if whole_hour_rule(payer, date.fromisoformat(service_date)):
                 new_units = by_rules // 4 * 4
                 if new_units != by_rules:
                     f.fix_text = (f"Change units from {billed} to {new_units}: {by_rules} by Summit's "

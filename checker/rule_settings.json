@@ -1,0 +1,13 @@
+{
+  "filing_limits": [
+    {"payer": "PY01", "days": 30, "from": null, "to": "2026-07-31", "source": "Northwind provider manual, §6.1"},
+    {"payer": "PY01", "days": 45, "from": "2026-08-01", "to": null, "source": "Northwind Provider Bulletin 2026-07"},
+    {"payer": "PY03", "days": 60, "from": null, "to": null, "source": "Summit provider handbook, §9.3"}
+  ],
+  "weekend_modifiers": [
+    {"payer": "PY02", "service_code": "T1019", "modifier": "U3", "from": "2026-09-01", "to": null, "source": "Harbor Provider Notice 2026-08"}
+  ],
+  "whole_hour_units": [
+    {"payer": "PY03", "from": "2026-07-01", "to": null, "source": "Summit Amendment 3 (inferred, effective 2026-07-01)"}
+  ]
+}

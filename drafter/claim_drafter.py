@@ -12,9 +12,9 @@ from pathlib import Path
 
 from checker.claim_checker import (
     Claim,
-    HARBOR_WEEKEND_BULLETIN,
     PAYER_IDS,
-    SUMMIT_WHOLE_HOUR_PERIOD,
+    expected_modifier,
+    whole_hour_rule,
     History,
     check_claim,
     load_evidence,
@@ -102,17 +102,14 @@ def construct(data_dir, authorizations, verified_seconds, agencies):
         units, remainder = divmod(seconds, 900)
         if auth.payer == "PY01" and remainder >= 480:
             units += 1
-        if auth.payer == "PY03" and SUMMIT_WHOLE_HOUR_PERIOD.includes(service_date):
+        if whole_hour_rule(auth.payer, service_date):
             summit_adjustments += int(units % 4 != 0)
             units -= units % 4
         if units <= 0:
             skipped.append((key, agency, "no billable units"))
             continue
 
-        modifier = ""
-        if auth.payer == "PY02" and service == "T1019":
-            weekend = service_date.weekday() >= 5
-            modifier = "U3" if weekend and HARBOR_WEEKEND_BULLETIN.includes(service_date) else "U2"
+        modifier = expected_modifier(auth.payer, service, service_date) or ""
 
         # Simulate a daily run after the last visit clock-out. The export does
         # not contain verification timestamps or actual filing times.

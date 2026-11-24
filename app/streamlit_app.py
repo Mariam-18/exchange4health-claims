@@ -11,6 +11,7 @@ Two pages share one review workspace design:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections import Counter, defaultdict
@@ -23,6 +24,7 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app import activity  # noqa: E402
 from app.review import (  # noqa: E402
     ISSUE_HELP,
     ISSUE_LABELS,
@@ -39,7 +41,9 @@ from app.review import (  # noqa: E402
     merge_changes,
     sort_key,
 )
-from checker.claim_checker import parse_date, read_rows  # noqa: E402
+from app import rules_admin, ui_alerts, ui_reports  # noqa: E402
+from app.analysis import build_frame  # noqa: E402
+from checker.claim_checker import parse_date, read_rows, replay_all, rules_in_force, set_rules  # noqa: E402
 
 DEFAULT_DATA = ROOT / "Resonance_assessment_day__confirmation_and_preparation" / "Resonance - graduate preparation data"
 FIRST_SERVICE_DATE, LAST_SERVICE_DATE = date(2026, 6, 1), date(2026, 11, 30)
@@ -70,14 +74,29 @@ def new_workspace(rows: list[dict], *, with_history: bool, **extra) -> dict:
 
 
 @st.cache_data(show_spinner="Checking claims…")
-def run_checker(rows: tuple, with_history: bool) -> list[dict]:
-    """Run the checker on the workspace rows. Cached on the row contents."""
-    return assess(Path(data_dir), [dict(r) for r in rows], with_history=with_history)
+def run_checker(rows: tuple, with_history: bool, rules_json: str) -> list[dict]:
+    """Run the checker on the workspace rows under the given rules. Cached on rows and rules."""
+    with rules_in_force(json.loads(rules_json)):
+        return assess(Path(data_dir), [dict(r) for r in rows], with_history=with_history)
 
 
 @st.cache_data(show_spinner="Drafting claims from EVV visits…")
-def draft_rows(agency: str, last_date: date):
-    return build_drafts(Path(data_dir), agency, last_date)
+def draft_rows(agency: str, last_date: date, rules_json: str):
+    with rules_in_force(json.loads(rules_json)):
+        return build_drafts(Path(data_dir), agency, last_date)
+
+
+@st.cache_data(show_spinner="Analysing past claims…")
+def history_analysis(rules_json: str):
+    """Past claims with derived fields and the checker's predictions and evidence under the given rules."""
+    with rules_in_force(json.loads(rules_json)):
+        history, _, _ = replay_all(Path(data_dir), include_details="all")
+    frame = build_frame(Path(data_dir), history)
+    return frame, {r["claim_id"]: r["assessment"] for r in history}
+
+
+def rules_key() -> str:
+    return json.dumps(rules_admin.current_rules(), sort_keys=True)
 
 
 @st.cache_data
@@ -91,22 +110,43 @@ def load_reference():
 
 
 def queue_for(ws: dict) -> list[ReviewItem]:
-    assessments = run_checker(tuple(tuple(r.items()) for r in ws["rows"]), ws["with_history"])
+    assessments = run_checker(tuple(tuple(r.items()) for r in ws["rows"]), ws["with_history"], rules_key())
     return build_queue(assessments, {r["claim_id"]: r for r in ws["rows"]})
 
 
-def log(ws: dict, item: ReviewItem, action: str, follow_up: str = "") -> None:
-    ws["log"].append({"claim": item.claim_id, "action": action, "follow-up": follow_up})
+def log(ws: dict, name: str, item: ReviewItem, event: str, codes: list[str], action: str,
+        follow_up: str = "", after: ReviewItem | None = None, removed: bool = False) -> None:
+    """Record a reviewer action in the workspace log and the saved activity log.
+
+    event: "fix", "choice" or "contact". after: the claim as re-checked, if it was edited.
+    """
+    result = "removed" if removed else (
+        "" if after is None else ("ready" if not after.needs_review else "needs review"))
+    ws["log"].append({"claim": item.claim_id, "action": action, "follow-up": follow_up, "result": result})
+    activity.append([{
+        "workspace": name, "agency": item.row["agency_id"], "claim_id": item.claim_id,
+        "payer": item.assessment["payer"], "event": event, "codes": codes, "action": action,
+        "follow_up": follow_up, "result": result,
+        "remaining_codes": [] if after is None else [f.code for f in after.findings],
+        "billed_amount": item.billed_amount,
+    }])
 
 
-def edit_claims(ws: dict, changes: dict[str, dict], removals: set[str] = frozenset()) -> None:
-    """Apply claim edits and removals, re-run the checker and record what changed."""
+def edit_claims(ws: dict, name: str, changes: dict[str, dict], removals: set[str] = frozenset(),
+                actions: list[tuple] = ()) -> None:
+    """Apply claim edits and removals, re-run the checker, log the actions and record what changed.
+
+    actions: (claim item, event, codes, action text, follow-up) for each claim acted on.
+    """
     before = {i.claim_id: i.needs_review for i in queue_for(ws)}
     ws["rows"] = [
         apply_changes(r, changes[r["claim_id"]]) if r["claim_id"] in changes else r
         for r in ws["rows"] if r["claim_id"] not in removals
     ]
     after = {i.claim_id: i for i in queue_for(ws)}
+    for item, event, codes, action, follow_up in actions:
+        log(ws, name, item, event, codes, action, follow_up,
+            after=after.get(item.claim_id), removed=item.claim_id in removals)
     ws["last_result"] = {
         "cleared": [c for c in changes if not after[c].needs_review],
         "still": [c for c in changes if after[c].needs_review],
@@ -119,14 +159,15 @@ def edit_claims(ws: dict, changes: dict[str, dict], removals: set[str] = frozens
     st.session_state.version += 1
 
 
-def apply_auto(ws: dict, items: list[ReviewItem], code: str | None = None) -> None:
+def apply_auto(ws: dict, name: str, items: list[ReviewItem], code: str | None = None) -> None:
     """Apply one-click fixes on the given claims: every quick fix, or only the given issue's fix."""
-    changes = {}
+    changes, actions = {}, []
     for item in items:
         fixes = [f for f in item.findings if f.auto and (code is None or f.code == code)]
-        log(ws, item, " ".join(f.fix_text for f in fixes), " ".join(f.next_step for f in fixes if f.next_step))
         changes[item.claim_id] = merge_changes(fixes)
-    edit_claims(ws, changes)
+        actions.append((item, "fix", [f.code for f in fixes], " ".join(f.fix_text for f in fixes),
+                        " ".join(f.next_step for f in fixes if f.next_step)))
+    edit_claims(ws, name, changes, actions=actions)
 
 
 # ---------- display helpers ----------
@@ -240,8 +281,8 @@ def claim_panel(ws: dict, name: str, item: ReviewItem) -> None:
                 cols = st.columns([4, 1])
                 cols[0].markdown(f"**{f.fix_text}**")
                 if cols[1].button("Apply fix", key=f"fix_{key}", type="primary"):
-                    log(ws, item, f.fix_text, f.next_step)
-                    edit_claims(ws, {item.claim_id: f.change})
+                    edit_claims(ws, name, {item.claim_id: f.change},
+                                actions=[(item, "fix", [f.code], f.fix_text, f.next_step)])
                     st.rerun()
                 if f.next_step:
                     st.markdown(f.next_step)
@@ -252,18 +293,18 @@ def claim_panel(ws: dict, name: str, item: ReviewItem) -> None:
                 for c, choice in enumerate(f.choices):
                     if cols[c].button(choice.label, key=f"choice_{key}_{c}",
                                       type="secondary" if choice.remove else "primary"):
-                        log(ws, item, choice.label)
+                        action = [(item, "choice", [f.code], choice.label, "")]
                         if choice.remove:
-                            edit_claims(ws, {}, {item.claim_id})
+                            edit_claims(ws, name, {}, {item.claim_id}, actions=action)
                         else:
-                            edit_claims(ws, {item.claim_id: choice.change})
+                            edit_claims(ws, name, {item.claim_id: choice.change}, actions=action)
                         st.rerun()
             if f.contact:
                 who = item.payer_name if f.contact == "payer" else "EVV coordinator"
                 with st.popover(f"{'Contact' if f.contact == 'payer' else 'Message'} {who}"):
                     st.code(contact_message(item, f), language=None)
                     if st.button("Mark as sent", key=f"sent_{key}"):
-                        log(ws, item, f"Contacted {who} about {f.label.lower()}")
+                        log(ws, name, item, "contact", [f.code], f"Contacted {who} about {f.label.lower()}")
                         st.rerun()
 
     visits, auths = load_reference()
@@ -286,17 +327,18 @@ def claim_panel(ws: dict, name: str, item: ReviewItem) -> None:
 
 
 def show_panel(ws, name, items, clicked, slot, empty_text):
-    """Show the clicked claim, else the last one shown, else the first."""
+    """Below the list: the clicked claim (or the last one opened), else a prompt to click one."""
     slot = f"{name}_{slot}"
     if clicked:
         st.session_state[slot] = clicked.claim_id
-    by_id = {i.claim_id: i for i in items}
-    item = clicked or by_id.get(st.session_state.get(slot)) or (items[0] if items else None)
+    if not items:
+        st.markdown(empty_text)
+        return
+    item = clicked or {i.claim_id: i for i in items}.get(st.session_state.get(slot))
     if item:
-        st.markdown(f"Showing **{item.claim_id}**. Click any row to open another claim.")
         claim_panel(ws, name, item)
     else:
-        st.markdown(empty_text)
+        st.markdown("Click on any claim to see its details.")
 
 
 def issue_picker(items: list[ReviewItem], key: str, auto: bool) -> str | None:
@@ -317,6 +359,9 @@ def review_workspace(ws: dict, name: str, items: list[ReviewItem], ready_label: 
     """Metrics, leading-issue switch and the four tabs, for the given claims of one workspace."""
     ready = [i for i in items if not i.needs_review]
     review = [i for i in items if i.needs_review]
+    activity.record_flagged(name, {i.claim_id: {
+        "agency": i.row["agency_id"], "codes": [f.code for f in i.findings],
+        "auto": [f.code for f in i.findings if f.auto]} for i in review})
     leading_only = st.toggle(
         "Leading issue only", value=True, key=f"{name}_leading",
         help="On: a claim with anything that needs a person is listed only there. "
@@ -360,11 +405,8 @@ def review_workspace(ws: dict, name: str, items: list[ReviewItem], ready_label: 
                 shown = [i for i in shown if any(
                     f.code == "D01" and VISIT_STATUS_FILTERS[f.action] == status for f in i.findings)]
         shown.sort(key=lambda i: sort_key(i, sort_by))
-        left, right = st.columns([3, 2])
-        with left:
-            clicked, _ = worklist(shown, f"{name}_manual_list", person_columns)
-        with right:
-            show_panel(ws, name, shown, clicked, "manual", "No claims need a person.")
+        clicked, _ = worklist(shown, f"{name}_manual_list", person_columns)
+        show_panel(ws, name, shown, clicked, "manual", "No claims need a person.")
 
     with tabs[1]:
         issue = issue_picker(one_click, f"{name}_issue_auto", auto=True)
@@ -372,21 +414,18 @@ def review_workspace(ws: dict, name: str, items: list[ReviewItem], ready_label: 
         group.sort(key=lambda i: sort_key(i, "deadline"))
         if issue:
             issue_heading(group, issue)
-        left, right = st.columns([3, 2])
-        with left:
-            scope = f"the {ISSUE_LABELS[issue].lower()} fix" if issue else "every quick fix"
-            st.markdown(f"Tick claims to apply {scope} to them, or apply it to the whole list.")
-            clicked, ticked = worklist(group, f"{name}_auto_list", quick_columns, ticks=True)
-            bar = st.columns(2)
-            if bar[0].button(f"Apply to {len(ticked)} ticked", disabled=not ticked, type="primary",
-                             key=f"{name}_apply_ticked"):
-                apply_auto(ws, ticked, issue)
-                st.rerun()
-            if bar[1].button(f"Apply to all {len(group)}", disabled=not group, key=f"{name}_apply_all"):
-                apply_auto(ws, group, issue)
-                st.rerun()
-        with right:
-            show_panel(ws, name, group, clicked, "auto", "No one-click fixes left.")
+        scope = f"the {ISSUE_LABELS[issue].lower()} fix" if issue else "every quick fix"
+        st.markdown(f"Tick claims to apply {scope} to them, or apply it to the whole list.")
+        clicked, ticked = worklist(group, f"{name}_auto_list", quick_columns, ticks=True)
+        bar = st.columns([1, 1, 4])
+        if bar[0].button(f"Apply to {len(ticked)} ticked", disabled=not ticked, type="primary",
+                         key=f"{name}_apply_ticked"):
+            apply_auto(ws, name, ticked, issue)
+            st.rerun()
+        if bar[1].button(f"Apply to all {len(group)}", disabled=not group, key=f"{name}_apply_all"):
+            apply_auto(ws, name, group, issue)
+            st.rerun()
+        show_panel(ws, name, group, clicked, "auto", "No one-click fixes left.")
 
     with tabs[2]:
         ready.sort(key=lambda i: sort_key(i, "deadline"))
@@ -403,11 +442,8 @@ def review_workspace(ws: dict, name: str, items: list[ReviewItem], ready_label: 
             return {**base_columns(i), "Units": i.row["units"],
                     "Changes made": changes_made(ws["original"][i.claim_id], i.row)}
 
-        left, right = st.columns([3, 2])
-        with left:
-            clicked, _ = worklist(ready, f"{name}_ready_list", ready_columns)
-        with right:
-            show_panel(ws, name, ready, clicked, "ready", "No claims are ready yet.")
+        clicked, _ = worklist(ready, f"{name}_ready_list", ready_columns)
+        show_panel(ws, name, ready, clicked, "ready", "No claims are ready yet.")
 
     with tabs[3]:
         if ws["log"]:
@@ -429,43 +465,54 @@ workspaces = st.session_state.workspaces
 if "check" not in workspaces:
     workspaces["check"] = new_workspace(load_pending(Path(data_dir)), with_history=True)
 
-# Mock sign-in: the agency logs in and sees only its own claims.
-if not st.session_state.get("agency"):
+set_rules(rules_admin.current_rules())
+RULES_TEAM = "Exchange4Health rules team"
+
+# Mock sign-in: an agency billing team sees only its own claims; the rules team sees alerts and all agencies.
+if not st.session_state.get("user"):
     st.title("Exchange4Health · Claim review")
     with st.form("sign_in", border=True):
-        st.markdown("Sign in to your agency's billing workspace.")
+        st.markdown("Sign in to your workspace.")
         agencies = sorted({r["agency_id"] for r in workspaces["check"]["rows"]})
-        agency_choice = st.selectbox("Agency", agencies)
+        who = st.selectbox("Account", agencies + [RULES_TEAM],
+                           format_func=lambda a: a if a == RULES_TEAM else f"Agency {a}")
         password = st.text_input("Password", type="password", help="Prototype: any password works.")
         if st.form_submit_button("Sign in", type="primary"):
             if password:
-                st.session_state.agency = agency_choice
+                st.session_state.user = who
                 workspaces.pop("draft", None)
                 st.rerun()
             st.error("Enter a password.")
     st.stop()
 
-agency = st.session_state.agency
+user = st.session_state.user
+is_rules_team = user == RULES_TEAM
+agency = None if is_rules_team else user
 with st.sidebar:
-    st.markdown(f"Signed in as **{agency}**")
+    st.markdown(f"Signed in as **{user}**")
     if st.button("Sign out"):
-        st.session_state.agency = None
+        st.session_state.user = None
         st.rerun()
-    if st.button("Reset all changes"):
+    if st.button("Reset all changes", help="Restores the original claims and clears saved activity."):
         st.session_state.workspaces = {}
+        activity.clear()
         st.rerun()
 
-title_col, page_col = st.columns([3, 2])
-title_col.title(f"Claim review · {agency}")
-page = page_col.segmented_control("Page", ["Check claims", "Draft claims"], default="Check claims",
-                                  label_visibility="collapsed") or "Check claims"
+if is_rules_team:
+    pages = ["Alerts", "Reports"]
+else:
+    notices = sum(1 for c in rules_admin.read_changes() if c["decision"] == "approved")
+    pages = ["Check claims", "Draft claims", "Reports", f"Alerts ({notices})" if notices else "Alerts"]
+title_col, page_col = st.columns([2, 3])
+title_col.title("Rules team" if is_rules_team else f"Claim review · {agency}")
+page = page_col.segmented_control("Page", pages, default=pages[0], label_visibility="collapsed") or pages[0]
 
 if page == "Check claims":
     ws = workspaces["check"]
     mine = [i for i in queue_for(ws) if i.row["agency_id"] == agency]
     review_workspace(ws, "check", mine, "ready-to-submit claims", f"ready_to_submit_{agency}.csv")
 
-else:
+elif page == "Draft claims":
     st.markdown(
         "Build claims straight from verified EVV visits: one claim per patient, service and date of "
         "service, with units, authorization and modifier set by the payer's rules. Each draft is then "
@@ -481,7 +528,7 @@ else:
         generate = cols[1].form_submit_button("Generate claims", type="primary")
     if generate and len(picked) == 2:
         start, end = picked
-        rows, failed = draft_rows(agency, end)
+        rows, failed = draft_rows(agency, end, rules_key())
         workspaces["draft"] = new_workspace(rows, with_history=False, start=start, end=end, failed=failed)
         st.session_state.version += 1
 
@@ -502,6 +549,20 @@ else:
             st.dataframe(pd.DataFrame(failed, columns=["Patient", "Service", "Date of service", "Reason"]),
                          hide_index=True, width="stretch")
     review_workspace(ws, "draft", in_range, "drafted claims ready to submit", f"drafted_claims_{agency}.csv")
+
+elif page == "Reports":
+    frame, assessments = history_analysis(rules_key())
+    patient_agency = dict(zip(frame["patient_id"], frame["agency_id"]))
+    ui_reports.reports_page(Path(data_dir), frame, assessments, queue_for(workspaces["check"]), patient_agency,
+                            agency, sorted(frame["agency_id"].unique()))
+
+elif page.startswith("Alerts"):
+    if is_rules_team:
+        frame, _ = history_analysis(rules_key())
+        if ui_alerts.rules_team_alerts(Path(data_dir), rules_admin.current_rules(), frame):
+            st.rerun()
+    else:
+        ui_alerts.agency_alerts(agency)
 
 with st.sidebar:
     st.divider()

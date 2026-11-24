@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+from contextlib import contextmanager
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -46,9 +48,81 @@ class EffectivePeriod:
         return self.start <= service_date and (self.end is None or service_date <= self.end)
 
 
-NORTHWIND_FILING_BULLETIN = EffectivePeriod(start=date(2026, 8, 1))
-HARBOR_WEEKEND_BULLETIN = EffectivePeriod(start=date(2026, 9, 1))
-SUMMIT_WHOLE_HOUR_PERIOD = EffectivePeriod(start=date(2026, 7, 1))
+# Dated payer rules that bulletins and contract amendments change: filing limits, weekend
+# modifiers and whole-hour billing. They live in a settings file so an approved change takes
+# effect without editing code. Base rules from the provider manuals stay in the check functions.
+DEFAULT_RULES_FILE = Path(__file__).with_name("rule_settings.json")
+_rules: dict = {}
+
+
+def load_rules(path: Path | None = None) -> dict:
+    """Read rule settings from a JSON file (default: E4H_RULES_FILE, else checker/rule_settings.json)."""
+    path = path or Path(os.environ.get("E4H_RULES_FILE", DEFAULT_RULES_FILE))
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def set_rules(rules: dict) -> None:
+    """Make the given rule settings the ones the checker applies."""
+    global _rules
+    _rules = rules
+
+
+def get_rules() -> dict:
+    """Return the rule settings in force, loading the default file on first use."""
+    if not _rules:
+        set_rules(load_rules())
+    return _rules
+
+
+@contextmanager
+def rules_in_force(rules: dict):
+    """Temporarily apply other rule settings, e.g. to preview a proposed change."""
+    previous = get_rules()
+    set_rules(rules)
+    try:
+        yield
+    finally:
+        set_rules(previous)
+
+
+def _period(entry: dict) -> EffectivePeriod:
+    start = date.fromisoformat(entry["from"]) if entry.get("from") else date.min
+    end = date.fromisoformat(entry["to"]) if entry.get("to") else None
+    return EffectivePeriod(start=start, end=end)
+
+
+def filing_limit(payer: str, service_date: date) -> tuple[int, str] | None:
+    """Return (days, source) of the filing limit for this payer and date of service, or None if no limit."""
+    matches = [e for e in get_rules().get("filing_limits", [])
+               if e["payer"] == payer and _period(e).includes(service_date)]
+    if not matches:
+        return None
+    latest = max(matches, key=lambda e: _period(e).start)
+    return latest["days"], latest["source"]
+
+
+def weekend_modifier_rule(payer: str, service_code: str, service_date: date) -> dict | None:
+    """Return the weekend modifier rule in force for this payer, service and date, if any."""
+    for entry in get_rules().get("weekend_modifiers", []):
+        if (entry["payer"], entry["service_code"]) == (payer, service_code) and _period(entry).includes(service_date):
+            return entry
+    return None
+
+
+def expected_modifier(payer: str, service_code: str, service_date: date) -> str | None:
+    """Return the modifier the payer requires on this service and date, or None if none is required."""
+    if (payer, service_code) != ("PY02", "T1019"):
+        return None
+    rule = weekend_modifier_rule(payer, service_code, service_date)
+    return rule["modifier"] if rule and service_date.weekday() >= 5 else "U2"
+
+
+def whole_hour_rule(payer: str, service_date: date) -> dict | None:
+    """Return the whole-hour billing rule in force for this payer and date of service, if any."""
+    for entry in get_rules().get("whole_hour_units", []):
+        if entry["payer"] == payer and _period(entry).includes(service_date):
+            return entry
+    return None
 
 
 def parse_date(value: str) -> date:
@@ -379,13 +453,14 @@ def check_authorization(
     return (), ()
 
 
-def check_northwind(claim: Claim, *, details=None) -> CheckFlags:
-    """Apply the Northwind filing window to the claim. Return codes and review reasons."""
-    elapsed = (claim.submission_date - claim.service_date).days
-    filing_limit = 45 if NORTHWIND_FILING_BULLETIN.includes(claim.service_date) else 30
-    if elapsed > filing_limit:
-        reference = "Northwind Provider Bulletin 2026-07" if filing_limit == 45 else "Northwind provider manual, §6.1"
-        record_filing(details, claim, filing_limit, reference)
+def check_filing(claim: Claim, *, details=None) -> CheckFlags:
+    """Apply the payer's filing limit for the date of service, if it has one. Return codes and review reasons."""
+    limit = filing_limit(claim.payer, claim.service_date)
+    if limit is None:
+        return (), ()
+    days, reference = limit
+    if (claim.submission_date - claim.service_date).days > days:
+        record_filing(details, claim, days, reference)
         return ("D03",), ()
     return (), ()
 
@@ -394,15 +469,13 @@ def check_harbor(claim: Claim, earlier: History, same_day: History, *, details=N
     """Check the Harbor modifier and daily units. Return codes and review reasons."""
     failures = []
     review = []
-    if claim.service_code == "T1019":
-        is_weekend = claim.service_date.weekday() >= 5
-        weekend_override = is_weekend and HARBOR_WEEKEND_BULLETIN.includes(claim.service_date)
-        modifier = "U3" if weekend_override else "U2"
-        if claim.modifier != modifier:
-            failures.append("D04")
-            reference = "Harbor Provider Notice 2026-08" if HARBOR_WEEKEND_BULLETIN.includes(claim.service_date) else "Harbor provider guide, Modifiers"
-            finding(details, "D04", reference, "apply_expected_modifier",
-                    submitted_modifier=claim.modifier, expected_modifier=modifier)
+    modifier = expected_modifier(claim.payer, claim.service_code, claim.service_date)
+    if modifier is not None and claim.modifier != modifier:
+        failures.append("D04")
+        rule = weekend_modifier_rule(claim.payer, claim.service_code, claim.service_date)
+        reference = rule["source"] if rule else "Harbor provider guide, Modifiers"
+        finding(details, "D04", reference, "apply_expected_modifier",
+                submitted_modifier=claim.modifier, expected_modifier=modifier)
 
     key = claim.daily_key
     earlier_units = earlier.daily_units[key] + earlier.projected_daily_units[key]
@@ -422,35 +495,33 @@ def check_harbor(claim: Claim, earlier: History, same_day: History, *, details=N
 
 
 def check_summit(claim: Claim, *, details=None, verified_seconds=None) -> CheckFlags:
-    """Apply Summit filing and unit increment rules. Return codes and review reasons."""
-    failures = []
-    elapsed = (claim.submission_date - claim.service_date).days
-    if elapsed > 60:
-        failures.append("D03")
-        record_filing(details, claim, 60, "Summit provider handbook, §9.3")
-    if SUMMIT_WHOLE_HOUR_PERIOD.includes(claim.service_date) and claim.units % 4:
-        failures.append("D10")
+    """Apply Summit's whole-hour rule when in force. Return codes and review reasons."""
+    rule = whole_hour_rule(claim.payer, claim.service_date)
+    if rule and claim.units % 4:
         finding(
-            details, "D10", "Summit Amendment 3 (inferred, effective 2026-07-01)",
+            details, "D10", rule["source"],
             "review_whole_hour_units", billed_units=claim.units, required_unit_multiple=4,
             remainder_units=claim.units % 4,
             verified_minutes=None if verified_seconds is None else verified_seconds / 60,
             evv_units_exact=None if verified_seconds is None else verified_seconds / 900,
             evv_supported_units=None if verified_seconds is None else verified_seconds // 900,
         )
-    return tuple(failures), ()
+        return ("D10",), ()
+    return (), ()
 
 
 def check_payer_rules(claim: Claim, earlier: History, same_day: History, *,
                       details=None, verified_seconds=None) -> CheckFlags:
-    """Dispatch a supported payer's checks. Return codes and review reasons."""
-    if claim.payer == "PY01":
-        return check_northwind(claim, details=details)
+    """Apply the filing limit, then the payer's own checks. Return codes and review reasons."""
+    if claim.payer not in PAYER_IDS:
+        return (), ("Unknown payer",)
+    checks = [check_filing(claim, details=details)]
     if claim.payer == "PY02":
-        return check_harbor(claim, earlier, same_day, details=details)
+        checks.append(check_harbor(claim, earlier, same_day, details=details))
     if claim.payer == "PY03":
-        return check_summit(claim, details=details, verified_seconds=verified_seconds)
-    return (), ("Unknown payer",)
+        checks.append(check_summit(claim, details=details, verified_seconds=verified_seconds))
+    return (tuple(c for codes, _ in checks for c in codes),
+            tuple(r for _, reasons in checks for r in reasons))
 
 
 def check_claim(claim, authorizations, visit_seconds, earlier, same_day, *,
@@ -507,7 +578,9 @@ def record_submission(history, claim, status, *, predicted_paid):
 def replay_all(data_dir: Path, *, history_csv: Path | None = None, include_details=False):
     """Replay by date, breaking same-date ties in original row order within each CSV.
 
+    include_details: False, True (evidence for pending claims) or "all" (also for historical claims).
     Return (scored historical rows, pending prediction rows, historical input row count).
+    Rows with evidence carry an "assessment" dict.
     """
     visit_records = {} if include_details else None
     authorizations, visit_seconds = load_evidence(data_dir, visit_records=visit_records)
@@ -545,7 +618,7 @@ def replay_all(data_dir: Path, *, history_csv: Path | None = None, include_detai
             for claim, row in batch:
                 same_day = other_totals.snapshot()
                 same_day.add(claim, count_units=True)
-                details = {} if include_details and row is None else None
+                details = {} if include_details and (row is None or include_details == "all") else None
                 failures, review = check_claim(
                     claim, authorizations, visit_seconds, file_history, same_day, details=details,
                     matching_visits=visit_records.get(claim.visit_key, ()) if visit_records is not None else (),
@@ -568,19 +641,19 @@ def replay_all(data_dir: Path, *, history_csv: Path | None = None, include_detai
                 if file_history is not earlier:
                     deferred.append((claim, status, not failures))
 
+                if details is not None:
+                    prediction["assessment"] = {
+                        "claim_id": claim.claim_id, "payer": claim.payer,
+                        "service_code": claim.service_code,
+                        "service_date": claim.service_date.isoformat(),
+                        "submission_date": claim.submission_date.isoformat(),
+                        "status": "needs_review" if failures or review else "ready_to_submit",
+                        "predicted_denial_code": failures[0] if failures else None,
+                        "failed_checks": list(failures),
+                        "finding_details": {code: details[code] for code in failures},
+                        "review_reasons": list(review),
+                    }
                 if row is None:
-                    if details is not None:
-                        prediction["assessment"] = {
-                            "claim_id": claim.claim_id, "payer": claim.payer,
-                            "service_code": claim.service_code,
-                            "service_date": claim.service_date.isoformat(),
-                            "submission_date": claim.submission_date.isoformat(),
-                            "status": "needs_review" if failures or review else "ready_to_submit",
-                            "predicted_denial_code": failures[0] if failures else None,
-                            "failed_checks": list(failures),
-                            "finding_details": {code: details[code] for code in failures},
-                            "review_reasons": list(review),
-                        }
                     pending[claim.claim_id] = prediction
                     continue
                 results.append({
