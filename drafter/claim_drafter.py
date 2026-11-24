@@ -1,5 +1,7 @@
 """Build claims from verified EVV and replay the resulting submission stream."""
 
+from __future__ import annotations
+
 import argparse
 import csv
 from collections import Counter, defaultdict
@@ -224,14 +226,14 @@ def experiment(data_dir, output_dir, *, check_history=False, confirmed_claim_ids
     counts = Counter()
     actions_by_scenario = defaultdict(Counter)
     existing = [entry for entries in by_key.values() for entry in entries] if check_history else ()
-    confirmed_replay = simulate(
+    base_replay = list(simulate(drafts, authorizations, verified_seconds, existing=existing))
+    confirmed_replay = list(simulate(
         drafts, authorizations, verified_seconds, existing=existing,
         confirm_reductions=not confirmed_claim_ids, confirmed_claim_ids=confirmed_claim_ids,
-    )
-    for (draft, decision), (confirmed_draft, confirmed) in zip(
-        simulate(drafts, authorizations, verified_seconds, existing=existing),
-        confirmed_replay, strict=True,
-    ):
+    ))
+    if len(base_replay) != len(confirmed_replay):
+        raise ValueError("Replay scenarios produced different numbers of drafts")
+    for (draft, decision), (confirmed_draft, confirmed) in zip(base_replay, confirmed_replay):
         c = draft.claim
         assert c.claim_id == confirmed_draft.claim.claim_id
         observed = by_key.get(c.duplicate_key, ())
