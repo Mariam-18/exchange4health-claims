@@ -59,6 +59,6 @@ def read_flagged() -> dict:
 
 def clear() -> None:
     """Delete all saved activity (used by the app's reset)."""
-    for path in (LOG_FILE, FLAGGED_FILE):
+    for path in (LOG_FILE, FLAGGED_FILE, STATE_DIR / "resubmissions.jsonl"):
         if path.exists():
             path.unlink()

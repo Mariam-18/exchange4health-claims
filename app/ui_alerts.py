@@ -66,6 +66,12 @@ def rules_team_alerts(data_dir: Path, rules: dict, frame) -> bool:
     return changed
 
 
+
+def md(text: str) -> str:
+    """Escape dollar signs so Streamlit doesn't render amounts as maths."""
+    return str(text).replace("$", "\\$")
+
+
 # ---------- bulletins ----------
 
 def bulletin_section(data_dir, rules, bulletins, agencies) -> bool:
@@ -110,14 +116,14 @@ def bulletin_proposal(data_dir, rules, bulletin, agencies) -> bool:
         return False
 
     reading = out["result"]
-    st.markdown(f"**Claude's reading:** {reading['summary']}")
+    st.markdown(f"**Claude's reading:** {md(reading['summary'])}")
     st.caption(f"{'Saved result' if out['from_cache'] else 'New result'} from {out['created'][:16].replace('T', ' ')} · {out['model']}")
     if st.button("Read again", key=f"again_{key}"):
         st.session_state[f"refresh_{key}"] = True
         st.rerun()
     if reading["outcome"] != "rule_change":
         st.warning(("Needs a developer: " if reading["outcome"] == "needs_developer" else "No rule change: ")
-                   + reading["reason_if_no_change"])
+                   + md(reading["reason_if_no_change"]))
         cols = st.columns(2)
         if reading["outcome"] == "needs_developer" and cols[0].button("Send to developers", key=f"dev_{key}"):
             rules_admin.record_change("bulletin", bulletin["name"], {}, {}, "sent to developers", reading["reason_if_no_change"])
@@ -137,10 +143,10 @@ def bulletin_proposal(data_dir, rules, bulletin, agencies) -> bool:
         change["source"] = title
         st.divider()
         st.markdown(f"**Proposed rule:** {rules_admin.describe_change(change)}")
-        st.markdown(proposal["explanation"])
+        st.markdown(md(proposal["explanation"]))
         st.markdown("**From the bulletin:**")
         for quote in proposal["evidence_quotes"]:
-            st.markdown(f"> {quote}")
+            st.markdown(f"> {md(quote)}")
         problems = rules_admin.validate_change(change, bulletin["text"], proposal["evidence_quotes"])
         if problems:
             st.error("Can't approve: " + " ".join(problems))
@@ -225,17 +231,17 @@ def unexpected_section(data_dir, rules, frame, groups) -> bool:
 def show_investigation(data_dir, rules, group, out, key) -> bool:
     result = out["result"]
     outcome = {"rule_proposed": "Proposed rule", "no_pattern": "No pattern found", "ask_payer": "Ask the payer"}
-    st.markdown(f"**{outcome[result['outcome']]}.** {result['interpretation']}")
+    st.markdown(f"**{outcome[result['outcome']]}.** {md(result['interpretation'])}")
     st.markdown("**Why, from the data:**")
     for reason in result["why"]:
-        st.markdown(f"- {reason}")
+        st.markdown(f"- {md(reason)}")
     check = out["number_check"]
     if check["unverified"]:
         st.warning(f"{len(check['unverified'])} of {check['stated']} numbers Claude stated weren't found in the data "
-                   f"it retrieved: {', '.join(check['unverified'])}. Check these before acting.")
+                   f"it retrieved: {md(', '.join(check['unverified']))}. Check these before acting.")
     else:
         st.markdown(f"All {check['stated']} numbers Claude stated were found in the data it retrieved.")
-    st.markdown(f"**Suggestion:** {result['suggestion']}")
+    st.markdown(f"**Suggestion:** {md(result['suggestion'])}")
     st.caption(f"{'Saved result' if out['from_cache'] else 'New result'} from {out['created'][:16].replace('T', ' ')} · "
                f"{out['model']} · {len(out['tool_calls'])} tool calls")
     with st.expander("How Claude worked this out"):

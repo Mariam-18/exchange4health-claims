@@ -41,7 +41,8 @@ from app.review import (  # noqa: E402
     merge_changes,
     sort_key,
 )
-from app import rules_admin, ui_alerts, ui_reports  # noqa: E402
+from app import rules_admin, ui_alerts, ui_reports, ui_status  # noqa: E402
+from app.ui_common import days_label, filter_claims, worklist  # noqa: E402
 from app.analysis import build_frame  # noqa: E402
 from checker.claim_checker import parse_date, read_rows, replay_all, rules_in_force, set_rules  # noqa: E402
 
@@ -93,6 +94,20 @@ def history_analysis(rules_json: str):
         history, _, _ = replay_all(Path(data_dir), include_details="all")
     frame = build_frame(Path(data_dir), history)
     return frame, {r["claim_id"]: r["assessment"] for r in history}
+
+
+@st.cache_data(show_spinner="Drafting claims for statistics…")
+def all_drafts(rules_json: str) -> list[dict]:
+    """Every claim the drafter would build, for all agencies, with whether it needs review."""
+    rows = []
+    with rules_in_force(json.loads(rules_json)):
+        for ag in sorted({r["agency_id"] for r in read_rows(Path(data_dir) / "claims_history.csv")}):
+            drafted, _ = build_drafts(Path(data_dir), ag, LAST_SERVICE_DATE)
+            if drafted:
+                checked = {a["claim_id"]: a for a in assess(Path(data_dir), drafted, with_history=False)}
+                rows += [{"agency": ag, "service_date": d["date_of_service"], "billed": float(d["billed_amount"]),
+                          "needs_review": checked[d["claim_id"]]["status"] == "needs_review"} for d in drafted]
+    return rows
 
 
 def rules_key() -> str:
@@ -172,12 +187,6 @@ def apply_auto(ws: dict, name: str, items: list[ReviewItem], code: str | None = 
 
 # ---------- display helpers ----------
 
-def days_label(days: int | None) -> str:
-    if days is None:
-        return "No limit"
-    return f"{-days} days late" if days < 0 else f"{days} days"
-
-
 def service_text(row: dict) -> str:
     return SERVICE_NAMES.get(row["service_code"].strip().upper(), row["service_code"]).capitalize()
 
@@ -214,25 +223,6 @@ def quick_columns(i: ReviewItem) -> dict:
     fixes = [f for f in i.findings if f.auto]
     return {"Quick fixes": labels(fixes), "Suggested fix": " ".join(f.fix_text for f in fixes),
             **base_columns(i), "Other issues": labels(f for f in i.findings if not f.auto)}
-
-
-def worklist(items: list[ReviewItem], key: str, columns, *, ticks: bool = False):
-    """Show a claim list. Clicking any cell opens that claim; ticks select rows for bulk actions.
-
-    Inputs: claims, a widget key, and a function mapping a claim to its row of display columns.
-    Output: (clicked claim or None, ticked claims).
-    """
-    frame = pd.DataFrame([columns(i) for i in items])
-    event = st.dataframe(
-        frame, hide_index=True, width="stretch", height=min(600, 38 + 35 * max(len(items), 1)),
-        on_select="rerun", selection_mode=["multi-row", "single-cell"] if ticks else "single-cell",
-        key=f"{key}_{st.session_state.version}",
-        column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
-    )
-    cells = event.selection.get("cells", [])
-    clicked = items[cells[-1][0]] if cells else None
-    ticked = [items[r] for r in event.selection.get("rows", [])]
-    return clicked, ticked
 
 
 def result_banner(ws: dict) -> None:
@@ -404,6 +394,7 @@ def review_workspace(ws: dict, name: str, items: list[ReviewItem], ready_label: 
             if status:
                 shown = [i for i in shown if any(
                     f.code == "D01" and VISIT_STATUS_FILTERS[f.action] == status for f in i.findings)]
+        shown = filter_claims(shown, f"{name}_manual", load_reference()[0])
         shown.sort(key=lambda i: sort_key(i, sort_by))
         clicked, _ = worklist(shown, f"{name}_manual_list", person_columns)
         show_panel(ws, name, shown, clicked, "manual", "No claims need a person.")
@@ -411,9 +402,10 @@ def review_workspace(ws: dict, name: str, items: list[ReviewItem], ready_label: 
     with tabs[1]:
         issue = issue_picker(one_click, f"{name}_issue_auto", auto=True)
         group = [i for i in one_click if issue is None or any(f.code == issue and f.auto for f in i.findings)]
-        group.sort(key=lambda i: sort_key(i, "deadline"))
         if issue:
             issue_heading(group, issue)
+        group = filter_claims(group, f"{name}_auto", load_reference()[0])
+        group.sort(key=lambda i: sort_key(i, "deadline"))
         scope = f"the {ISSUE_LABELS[issue].lower()} fix" if issue else "every quick fix"
         st.markdown(f"Tick claims to apply {scope} to them, or apply it to the whole list.")
         clicked, ticked = worklist(group, f"{name}_auto_list", quick_columns, ticks=True)
@@ -442,6 +434,7 @@ def review_workspace(ws: dict, name: str, items: list[ReviewItem], ready_label: 
             return {**base_columns(i), "Units": i.row["units"],
                     "Changes made": changes_made(ws["original"][i.claim_id], i.row)}
 
+        ready = filter_claims(ready, f"{name}_ready", load_reference()[0])
         clicked, _ = worklist(ready, f"{name}_ready_list", ready_columns)
         show_panel(ws, name, ready, clicked, "ready", "No claims are ready yet.")
 
@@ -498,16 +491,66 @@ with st.sidebar:
         activity.clear()
         st.rerun()
 
-if is_rules_team:
-    pages = ["Alerts", "Reports"]
-else:
-    notices = sum(1 for c in rules_admin.read_changes() if c["decision"] == "approved")
-    pages = ["Check claims", "Draft claims", "Reports", f"Alerts ({notices})" if notices else "Alerts"]
-title_col, page_col = st.columns([2, 3])
-title_col.title("Rules team" if is_rules_team else f"Claim review · {agency}")
-page = page_col.segmented_control("Page", pages, default=pages[0], label_visibility="collapsed") or pages[0]
+HOME = "Home"
+if st.session_state.get("page_for") != user:
+    st.session_state.page_for, st.session_state.page = user, HOME
+page = st.session_state.page
 
-if page == "Check claims":
+
+def go(target: str) -> None:
+    st.session_state.page = target
+    st.rerun()
+
+
+def tile(column, title: str, figure: str, text: str, target: str) -> None:
+    with column.container(border=True, height=230):
+        st.markdown(f"### {title}")
+        st.markdown(f"**{figure}**")
+        st.markdown(text)
+        if st.button("Open", key=f"tile_{target}", type="primary", use_container_width=True):
+            go(target)
+
+
+if page == HOME:
+    st.title("Exchange4Health · Rules team" if is_rules_team else f"Exchange4Health · {agency}")
+    if is_rules_team:
+        new_bulletins = sum(b["status"] == "new" for b in rules_admin.list_bulletins(Path(data_dir)))
+        cols = st.columns(2)
+        tile(cols[0], "News & approvals", f"{new_bulletins} new bulletin(s)",
+             "Payer bulletins and denials the rules didn't predict, read and investigated by Claude for your approval.",
+             "News")
+        tile(cols[1], "Statistics", "All agencies", "Standard statistics by period and agency, with Claude's review.",
+             "Statistics")
+    else:
+        frame, _ = history_analysis(rules_key())
+        mine = frame[frame["agency_id"] == agency]
+        paid_pct = 100 * (mine["status"] == "paid").mean() if len(mine) else 0
+        queue = [i for i in queue_for(workspaces["check"]) if i.row["agency_id"] == agency and i.needs_review]
+        patients = set(mine["patient_id"])
+        visit_count = sum(len([v for v in vs if v["verification_status"] == "verified"])
+                          for (pt, _, _), vs in load_reference()[0].items() if pt in patients)
+        notices = sum(1 for c in rules_admin.read_changes() if c["decision"] == "approved")
+        top = st.columns(3)
+        tile(top[0], "Draft claims", f"{visit_count:,} verified visits",
+             "Build claims straight from verified EVV visits, with payer rules applied.", "Draft claims")
+        tile(top[1], "Review unsubmitted claims",
+             f"{sum(not i.auto_only for i in queue)} need a person · {sum(i.auto_only for i in queue)} one-click",
+             "Check claims before they go to the payer and fix what has one right answer.", "Review unsubmitted claims")
+        tile(top[2], "Check claim status", f"{paid_pct:.0f}% paid · {100 - paid_pct:.0f}% denied",
+             "See payer decisions, fix and resubmit denials, and chase the ones nobody can explain.", "Check claim status")
+        bottom = st.columns(3)
+        tile(bottom[0], "Statistics", "Reports by period",
+             "Where claims get stuck and why, with Claude's review and a place to ask questions.", "Statistics")
+        tile(bottom[1], "News", f"{notices} rule change(s)", "Payer rule changes approved by Exchange4Health "
+             "and how they affect your claims.", "News")
+    st.stop()
+
+head = st.columns([1, 6])
+if head[0].button("← Home"):
+    go(HOME)
+head[1].title(page)
+
+if page == "Review unsubmitted claims":
     ws = workspaces["check"]
     mine = [i for i in queue_for(ws) if i.row["agency_id"] == agency]
     review_workspace(ws, "check", mine, "ready-to-submit claims", f"ready_to_submit_{agency}.csv")
@@ -550,13 +593,20 @@ elif page == "Draft claims":
                          hide_index=True, width="stretch")
     review_workspace(ws, "draft", in_range, "drafted claims ready to submit", f"drafted_claims_{agency}.csv")
 
-elif page == "Reports":
+elif page == "Check claim status":
+    frame, assessments = history_analysis(rules_key())
+    visits, auths = load_reference()
+    if st.session_state.get("status_message"):
+        st.success(st.session_state.pop("status_message"))
+    ui_status.status_page(Path(data_dir), agency, frame, assessments, visits, auths)
+
+elif page == "Statistics":
     frame, assessments = history_analysis(rules_key())
     patient_agency = dict(zip(frame["patient_id"], frame["agency_id"]))
     ui_reports.reports_page(Path(data_dir), frame, assessments, queue_for(workspaces["check"]), patient_agency,
-                            agency, sorted(frame["agency_id"].unique()))
+                            agency, sorted(frame["agency_id"].unique()), all_drafts(rules_key()))
 
-elif page.startswith("Alerts"):
+elif page in ("News", "News & approvals"):
     if is_rules_team:
         frame, _ = history_analysis(rules_key())
         if ui_alerts.rules_team_alerts(Path(data_dir), rules_admin.current_rules(), frame):

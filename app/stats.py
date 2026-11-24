@@ -18,6 +18,7 @@ from app.review import ISSUE_LABELS, describe
 from checker.claim_checker import read_rows
 
 STAT_TITLES = {
+    "journey": "Claims at each step: drafted, reviewed, fixed, submitted, paid",
     "denials_by_code": "Denials by code",
     "denials_by_month": "Denials by month",
     "flagged_by_reason": "What the checker flags, by expected reason",
@@ -43,12 +44,14 @@ def in_period(frame: pd.DataFrame, field: str, start: date, end: date, agency: s
 
 
 def compute(frame: pd.DataFrame, history_assessments: dict, data_dir: Path, *, field: str, start: date,
-            end: date, agency: str | None, queue: list, patient_agency: dict[str, str]) -> dict:
+            end: date, agency: str | None, queue: list, patient_agency: dict[str, str],
+            drafts: list[dict] = ()) -> dict:
     """All standard statistics for the scope and period.
 
     frame: analysis table of past claims (app.analysis.build_frame).
     history_assessments: {claim_id: checker assessment with finding details}.
     queue: current Check claims review items (app.review.ReviewItem), for queue health.
+    drafts: claims drafted from EVV for all agencies: {agency, service_date, needs_review, billed}.
     """
     part = in_period(frame, field, start, end, agency)
     denied = part[part["status"] == "denied"]
@@ -57,6 +60,7 @@ def compute(frame: pd.DataFrame, history_assessments: dict, data_dir: Path, *, f
                   "to": end.isoformat(), "claims": int(len(part)), "denied": int(len(denied)),
                   "denial_rate_pct": pct(len(denied), len(part)),
                   "billed": money(part["billed_amount"].sum()), "denied_billed": money(denied["billed_amount"].sum())},
+        "journey": journey(part, data_dir, start, end, agency, queue, patient_agency, drafts),
         "denials_by_code": denials_by_code(denied),
         "denials_by_month": denials_by_month(part, field),
         "flagged_by_reason": flagged_by_reason(part),
@@ -84,6 +88,43 @@ def money(value) -> float:
 
 def label(code: str) -> str:
     return f"{code} {ISSUE_LABELS.get(code, 'Other / manual review' if code == 'D99' else '')}".strip()
+
+
+def journey(part, data_dir, start, end, agency, queue, patient_agency, drafts) -> list[dict]:
+    """Claims at each step, in order: verified visits, drafts, unsubmitted claims, fixes, submissions, outcomes."""
+    def in_range(day: str) -> bool:
+        return start.isoformat() <= day <= end.isoformat()
+
+    visits = sum(1 for v in read_rows(data_dir / "evv_visits.csv")
+                 if v["verification_status"] == "verified" and in_range(v["clock_in"][:10])
+                 and (agency is None or patient_agency.get(v["patient_id"]) == agency))
+    my_drafts = [d for d in drafts if (agency is None or d["agency"] == agency) and in_range(d["service_date"])]
+    pending = [i for i in queue if (agency is None or i.row["agency_id"] == agency)
+               and in_range(pd.Timestamp(i.row["date_of_service"]).date().isoformat())]
+    log = [e for e in activity.read_log() if agency is None or e["agency"] == agency]
+    fixed = [e for e in log if e.get("workspace") == "check" and e["event"] in ("fix", "choice") and e["result"] == "ready"]
+    resubmitted = [e for e in log if e.get("workspace") == "status" and e["event"] == "resubmit"]
+    denied = part[part["status"] == "denied"]
+    paid = part[part["status"] == "paid"]
+
+    def row(stage, items, amount):
+        return {"stage": stage, "claims": int(items), "billed": money(amount)}
+
+    return [
+        row("1 Verified EVV visits", visits, 0),
+        row("2 Claims drafted from visits", len(my_drafts), sum(d["billed"] for d in my_drafts)),
+        row("3 Drafts needing review", sum(d["needs_review"] for d in my_drafts),
+            sum(d["billed"] for d in my_drafts if d["needs_review"])),
+        row("4 Unsubmitted claims", len(pending), sum(i.billed_amount for i in pending)),
+        row("5 Unsubmitted claims needing review", sum(i.needs_review for i in pending),
+            sum(i.billed_amount for i in pending if i.needs_review)),
+        row("6 Fixed in the app (now ready)", len(fixed), sum(e.get("billed_amount", 0) for e in fixed)),
+        row("7 Claims submitted", len(part), part["billed_amount"].sum()),
+        row("8 Paid", len(paid), paid["billed_amount"].sum()),
+        row("9 Denied", len(denied), denied["billed_amount"].sum()),
+        row("10 Denials resubmitted as corrected claims", len(resubmitted),
+            sum(e.get("billed_amount", 0) for e in resubmitted)),
+    ]
 
 
 def denials_by_code(denied: pd.DataFrame) -> list[dict]:

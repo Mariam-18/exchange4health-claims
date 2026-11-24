@@ -40,7 +40,7 @@ The checker reads the claim, the EVV visits, the authorizations and every earlie
 |---|---|---|
 | **Rules (Python)** | Applies each payer's rules, predicts paid or denied, works out the one correct fix where there is one | Every decision has a traceable reason: this rule, this date, this evidence. It gives the same answer every time and can be tested against history. |
 | **People** | Approve fixes, choose between a correction and removing a duplicate, contact payers and EVV coordinators, approve rule changes | They own the claim and the relationships, and some cases need judgement the data can't give. |
-| **AI (Claude)** | Reads payer bulletins and proposes rule changes; investigates denials the rules didn't predict and proposes the missing rule; reviews report statistics, digs into patterns and suggests what to change ([Alerts](#alerts-rules-team) and [Reports](#reports)) | Reading many payers' manuals and bulletins, and spotting patterns across thousands of claims, is where it saves the most time. Python computes every number; a person approves every change. |
+| **AI (Claude)** | Reads payer bulletins and proposes rule changes; investigates denials the rules didn't predict and proposes the missing rule; reviews statistics, digs into patterns and suggests what to change; answers questions about claims ([app walkthrough](app/README.md)) | Reading many payers' manuals and bulletins, and spotting patterns across thousands of claims, is where it saves the most time. Python computes every number; a person approves every change. |
 
 **Why mostly rules, not AI.** It's tempting to give every claim to a model and ask whether it will be paid. Billing is a regulated industry. Every decision to hold, change or submit a claim needs an audit trail, and the same claim must get the same answer every time. A model asked "will this be denied?" can't guarantee either, and it can't be tested in the same way. The value of AI is scale: there are hundreds of payers, each with manuals, bulletins and contract amendments. AI can turn those into rule changes that a person approves once. After that, the rules run deterministically on every claim.
 
@@ -48,66 +48,17 @@ The other value is the qualitative side: reading the statistics each month and s
 
 ## The app
 
-Sign in with any password, as either:
+Sign in with any password, as an agency (AG001–AG012) or as the Exchange4Health rules team. The home page has a tile for each job:
 
-- **an agency** (AG001–AG012): Check claims, Draft claims, Reports and Alerts, for its own claims only
-- **the Exchange4Health rules team**: Alerts with approvals, and Reports across all agencies
+| Page | Who | What it does |
+|---|---|---|
+| **Draft claims** | Agencies | Builds claims from verified EVV visits, with payer rules applied, then checks them |
+| **Review unsubmitted claims** | Agencies | Checks pending claims before submission. One-click fixes for issues with one right answer; plain-language next steps and contact drafts for the rest. Downloads the ready claims. |
+| **Check claim status** | Agencies | A paid/denied ribbon, then denials grouped into quick fix & resubmit (corrected claims, re-checked as of today), needs someone, duplicates, and unexplained denials |
+| **Statistics** | Both | Standard statistics by period, including claims at each step from visit to payment. Claude's review writes plain-English highlights, and an **Ask** box answers questions with checked numbers. |
+| **News** | Both | For agencies, payer rule changes and how many of their claims they affect. For the rules team, bulletins read by Claude and unexpected denials investigated by Claude, each with Python's impact check and a person's approval. |
 
-### Check claims and Draft claims
-
-- **Check claims:** the agency's pending claims, checked against the claims history.
-- **Draft claims:** pick dates of service and generate claims from verified EVV visits. Drafts are checked the same way.
-
-Both pages show the same four tabs:
-
-| Tab | What's in it |
-|---|---|
-| **Needs a person** | Claims with at least one issue that has no safe automatic fix. Filter by issue, payer and, for missing visits, visit status. Sort by days to the filing deadline or amount at stake. |
-| **One-click fixes** | Claims whose issues each have one correct answer: Harbor's modifier, a uniquely matching authorization, units under 30 minutes over verified time, a single 9-hour Harbor visit cut to 8 hours, Summit's whole hours. Apply per claim, per issue or in bulk. |
-| **Ready to submit** | Claims that pass every rule, with any changes made. Download as CSV in the claim format, with a `changes_made` column. |
-| **Activity log** | Every fix, choice and contact, with follow-ups. |
-
-Click any row to open the claim: each issue in plain language, the rule behind it (**?**), the fix or the next step, and the EVV visits and authorization behind it. After any change, the checker re-runs on every claim and reports knock-on effects, for example when a fixed claim uses up authorization units another claim needed.
-
-The **Leading issue only** switch decides where a claim with both kinds of issue appears: only under Needs a person (on), or in both tabs (off).
-
-### Alerts (rules team)
-
-**New bulletins**
-1. Claude reads the bulletin and proposes a rule change, quoting the sentences behind each value.
-2. Python checks that the quotes appear word for word, then replays past and pending claims under the proposed rule to show the impact.
-3. A person approves, sets an optional end date, or rejects. Bulletins that need a new kind of rule go to developers.
-
-**Unexpected denials**
-1. Python groups denials the checker didn't predict by payer, code and remark.
-2. Claude investigates with analysis tools, all computed by Python: breakdowns, samples, distributions, timelines, and backtests of candidate rules.
-3. It returns a proposed rule, "no pattern", or "ask the payer", with data-backed reasons. Python re-runs the backtest on any proposed rule.
-
-Every number Claude states is checked against the data it retrieved, and each tool call is shown. Approved changes appear on each agency's **Alerts** page with how many of its pending claims they affect.
-
-The dated payer rules (filing limits, Harbor's weekend modifier, Summit's whole hours) live in [`checker/rule_settings.json`](checker/rule_settings.json). Approved changes go to the app's own copy, so the repository's results don't change.
-
-### Reports
-
-Pick a period by date of service or submission date. Agencies see their own claims; the rules team can pick any agency or all.
-
-**Standard statistics (Python), with charts and tables:**
-- denials by code and by month
-- what the checker flags and what payers did
-- claims that passed without review and how many were paid
-- denials a one-click fix would have prevented (estimate)
-- caregiver and patient outliers (at least 10 claims)
-- payers
-- review queue health
-- fix uptake and time to resolve (from app activity)
-- unexpected denial reasons
-- recurring issues by agency
-- re-billed claims
-- visits that couldn't become claims
-
-**Review with Claude:** Claude picks the statistics worth attention and digs into what looks unusual with the same analysis tools. It traces case studies and gives each finding its evidence, interpretation, suggestion and confidence. A finding is added to [docs/investigation_log.md](docs/investigation_log.md) only when a person approves it.
-
-Design choices for these pages are in [DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md).
+Every claim list can be filtered by date of service, service, and patient, caregiver or claim ID. The full walkthrough, with what each page shows and a demo script, is in [app/README.md](app/README.md).
 
 ## Results
 
@@ -196,7 +147,7 @@ Changes to the checker's decision logic are logged in [LOGIC_CHANGES.md](docs/LO
 
 | Path | What it is |
 |---|---|
-| [app/](app/) | The Streamlit app: claim review (`review.py`), alerts (`rules_admin.py`, `monitoring.py`), reports (`stats.py`), analysis tools (`analysis.py`) and Claude calls (`ai.py`) |
+| [app/](app/README.md) | The Streamlit app, with a walkthrough and screenshots: claim review (`review.py`), alerts (`rules_admin.py`, `monitoring.py`), reports (`stats.py`), analysis tools (`analysis.py`) and Claude calls (`ai.py`) |
 | [checker/](checker/README.md) | Rules-based claim checker, with plain-language flowcharts |
 | [drafter/](drafter/README.md) | Builds claims from verified EVV and checks them |
 | [testing/](testing/README.md) | Historical test and drafter results |

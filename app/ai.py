@@ -67,11 +67,28 @@ class Finding(BaseModel):
     confidence: Literal["strong", "moderate", "weak"]
 
 
+StatKey = Literal[
+    "journey",
+    "denials_by_code", "denials_by_month", "flagged_by_reason", "passed_without_review", "one_click_estimate",
+    "outliers", "payers", "queue_health", "fix_uptake", "unexpected_reasons", "recurring_issues",
+    "rebilled_claims", "time_to_resolve", "visits_not_drafted",
+]
+
+
+class Highlight(BaseModel):
+    title: str
+    summary: str
+    stat_keys: List[StatKey]
+
+
 class ReportReview(BaseModel):
     headline: str
-    highlight_stats: List[str]
-    why_these: str
+    highlights: List[Highlight]
     findings: List[Finding]
+
+
+class Answer(BaseModel):
+    answer: str
 
 
 # ---------- tools ----------
@@ -273,8 +290,9 @@ def investigate(group: dict, data_dir: Path, frame, rules: dict, test_rule: Call
 REPORT_SYSTEM = """You review a billing report for Exchange4Health, a home care claims platform. Python has \
 computed the standard statistics below for the chosen scope and period. Your job:
 
-1. Choose the 3 to 6 statistics most worth a billing lead's attention this period (by their keys), and say why \
-in one or two sentences. Skip ones that show nothing unusual.
+1. Write 3 to 5 highlights: the most interesting results of this period for a billing lead. Each has a short \
+title, a plain-English summary of two or three sentences (what happened, how big it is, why it matters), and \
+stat_keys: the keys of the statistics that back it up (e.g. "rebilled_claims"). Skip what shows nothing unusual.
 2. Dig into what looks unusual with the tools: break it down, compare groups, check distributions. Decide whether \
 a real pattern exists. Report patterns that hold up, and say plainly when something you checked turned out to be \
 noise.
@@ -297,7 +315,7 @@ def review_report(scope: str, stats: dict, known: str, data_dir: Path, frame, re
             f"Standard statistics (JSON):\n{json.dumps(stats, indent=1, default=str)}\n\n"
             "The tools work on claims within this scope and period.")
     tools = analysis_tools(include_test_rule=False)
-    return cached("report", [scope, stats, known],
+    return cached("report", ["v2", scope, stats, known],
                   lambda: call(REPORT_SYSTEM, user, ReportReview, tools=tools, effort="high",
                                tool_runner=lambda n, a: run_tool(n, a, data_dir, frame, None)),
                   refresh)
@@ -324,11 +342,37 @@ def numbers_in(text: str) -> list[tuple[float, bool, str]]:
 def check_numbers(texts: list[str], sources: list) -> dict:
     """Which numbers Claude stated can be found in the data it was given or retrieved.
 
-    A number matches if it equals a source number; a percentage also matches a source number within 0.5.
+    A number matches if it equals a source number. Percentages may differ by up to 0.5 and dollar amounts
+    by up to $1 (rounding).
     """
     source_values = {v for v, _, _ in numbers_in(json.dumps(sources, default=str))}
     source_values |= {float(x) for x in re.findall(r"\d+(?:\.\d+)?", json.dumps(sources, default=str))}
     stated = [n for text in texts for n in numbers_in(text)]
+    def tolerance(pct: bool, orig: str) -> float:
+        return 0.51 if pct else (1.0 if orig.startswith("$") else 0.001)
+
     unverified = sorted({orig for value, pct, orig in stated
-                         if not any(abs(value - s) < (0.51 if pct else 0.001) for s in source_values)})
+                         if not any(abs(value - s) < tolerance(pct, orig) for s in source_values)})
     return {"stated": len(stated), "unverified": unverified}
+
+
+ASK_SYSTEM = """You answer questions from a home care billing team about their claims, using the analysis \
+tools over the claims history for the given scope. Each claim has a payer outcome (paid or denied with a code), \
+the checker's prediction, EVV visit details and caregivers.
+
+- Use the tools to get the numbers. Don't state numbers you didn't get from a tool.
+- Answer in a few plain sentences, leading with the direct answer. Name claims, patients or caregivers where \
+that helps.
+- If the data can't answer the question, say so and say what it can tell them instead.
+- Codes: D01 no verified visit, D02 authorization used up, D03 late filing, D04 modifier, D05 duplicate, \
+D06 Harbor daily cap, D07 missing authorization number, D08 wrong authorization, D09 units over verified time, \
+D10 Summit whole hours, D99 other. Payers: PY01 Northwind, PY02 Harbor, PY03 Summit."""
+
+
+def ask(question: str, scope: str, data_dir: Path, frame) -> dict:
+    """Answer a free-text question about claims in scope with the analysis tools."""
+    user = f"Scope: {scope}\n\nQuestion: {question}"
+    tools = analysis_tools(include_test_rule=False)
+    return cached("ask", [scope, question.strip().lower(), len(frame)],
+                  lambda: call(ASK_SYSTEM, user, Answer, tools=tools, effort="medium",
+                               tool_runner=lambda n, a: run_tool(n, a, data_dir, frame, None)))

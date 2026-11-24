@@ -84,3 +84,27 @@ Choices made while building the sign-in roles, the Alerts page and the Reports p
   - pasted bulletins
   - Claude results
 - **"Reset all changes"** clears claims and activity. **"Restore the repository's rules"** and **"Clear the decision log"** are on the Demo controls tab.
+
+## Site structure, claim status and Ask (second round)
+
+- **Home page of tiles** after sign-in, replacing the page switcher. Each tile shows a headline figure and opens its page, and every page has **← Home**. The pages were renamed to match the jobs:
+  - Draft claims
+  - Review unsubmitted claims (was Check claims)
+  - Check claim status (new)
+  - Statistics (was Reports)
+  - News (was Alerts)
+- **Filters on every claim list:** date of service, service, and a search box that matches patient, claim ID or caregiver. Caregivers are matched through that day's EVV visits.
+- **Check claim status** covers each agency's submitted claims:
+  - **The data has no current date, so today is 31 January 2027,** the latest submission date in the history.
+  - **Each denial goes into one group, in this order:**
+    1. duplicates (the payer said D05)
+    2. unexplained (the checker didn't predict the payer's code)
+    3. quick fix (every issue the checker found has a one-click fix)
+    4. needs someone (the rest)
+  - **Corrected claims** get frequency code 7, the original claim ID, a new ID (`<original>-R`) and today's submission date. They are re-checked against the full history, so late ones come back as D03 rather than looking fixable. For AG009: 62 quick-fix denials gave 34 predicted paid, 27 past the deadline and 1 with a used-up authorization.
+  - **Claims already resubmitted or resolved** are hidden from the groups by default.
+- **Claims at each step** is a new statistic, running from verified visits through drafts, review, fixes and submission to paid, denied and resubmitted. Drafts and pending claims are counted by date of service; submitted claims use the chosen period field.
+- **Highlights are plain-English summaries:** a title, two or three sentences, and the statistics behind them, shown underneath. They replace a list of statistic names.
+- **Ask about your claims** sits on Statistics and Check claim status. Claude answers with the same read-only analysis tools, the numbers are checked, and the tables used are shown. It's scoped to the agency, or to the chosen agency and period.
+- **Look:** the case study's navy `#1F3864`, serif headings (Streamlit's built-in serif) and sans-serif body text.
+- **Screenshots** in `app/README.md` are placeholders, to be added by hand.
