@@ -45,7 +45,7 @@ from app import rules_admin, ui_alerts, ui_reports, ui_status  # noqa: E402
 from app.ui_common import days_label, filter_claims, worklist  # noqa: E402
 from app.analysis import build_frame  # noqa: E402
 from checker.claim_checker import parse_date, read_rows, replay_all, rules_in_force, set_rules  # noqa: E402
-from drafter.claim_drafter import DUPLICATE_DRAFT_PREFIX  # noqa: E402
+from drafter.claim_drafter import DUPLICATE_DRAFT_PREFIX, PENDING_DRAFT_PREFIX  # noqa: E402
 
 DEFAULT_DATA = ROOT / "Resonance_assessment_day__confirmation_and_preparation" / "Resonance - graduate preparation data"
 FIRST_SERVICE_DATE, LAST_SERVICE_DATE = date(2026, 6, 1), date(2026, 11, 30)
@@ -581,6 +581,11 @@ elif page == "Draft claims":
     if duplicate_count:
         label = "claim was" if duplicate_count == 1 else "claims were"
         st.caption(f"{duplicate_count} {label} not created because a matching claim was already submitted.")
+    pending_count = sum(reason.startswith(PENDING_DRAFT_PREFIX) for _, _, _, reason in failed)
+    if pending_count:
+        label = "claim was" if pending_count == 1 else "claims were"
+        st.caption(f"{pending_count} {label} not created because the visits already have pending claims. "
+                   "See the skipped visit groups for the claim IDs to look up in Review unsubmitted claims.")
     if failed:
         with st.expander(f"Skipped visit groups ({len(failed)})"):
             st.dataframe(pd.DataFrame(failed, columns=["Patient", "Service", "Date of service", "Reason"]),
