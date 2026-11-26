@@ -68,7 +68,6 @@ class Finding(BaseModel):
 
 
 StatKey = Literal[
-    "journey",
     "denials_by_code", "denials_by_month", "flagged_by_reason", "passed_without_review", "one_click_estimate",
     "outliers", "payers", "queue_health", "fix_uptake", "unexpected_reasons", "recurring_issues",
     "rebilled_claims", "time_to_resolve", "visits_not_drafted",

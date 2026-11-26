@@ -96,20 +96,6 @@ def history_analysis(rules_json: str):
     return frame, {r["claim_id"]: r["assessment"] for r in history}
 
 
-@st.cache_data(show_spinner="Drafting claims for statistics…")
-def all_drafts(rules_json: str) -> list[dict]:
-    """Every claim the drafter would build, for all agencies, with whether it needs review."""
-    rows = []
-    with rules_in_force(json.loads(rules_json)):
-        for ag in sorted({r["agency_id"] for r in read_rows(Path(data_dir) / "claims_history.csv")}):
-            drafted, _ = build_drafts(Path(data_dir), ag, LAST_SERVICE_DATE, block_duplicates=False)
-            if drafted:
-                checked = {a["claim_id"]: a for a in assess(Path(data_dir), drafted, with_history=False)}
-                rows += [{"agency": ag, "service_date": d["date_of_service"], "billed": float(d["billed_amount"]),
-                          "needs_review": checked[d["claim_id"]]["status"] == "needs_review"} for d in drafted]
-    return rows
-
-
 def rules_key() -> str:
     return json.dumps(rules_admin.current_rules(), sort_keys=True)
 
@@ -609,7 +595,7 @@ elif page == "Statistics":
     frame, assessments = history_analysis(rules_key())
     patient_agency = dict(zip(frame["patient_id"], frame["agency_id"]))
     ui_reports.reports_page(Path(data_dir), frame, assessments, queue_for(workspaces["check"]), patient_agency,
-                            agency, sorted(frame["agency_id"].unique()), all_drafts(rules_key()))
+                            agency, sorted(frame["agency_id"].unique()))
 
 elif page in ("News", "News & approvals"):
     if is_rules_team:

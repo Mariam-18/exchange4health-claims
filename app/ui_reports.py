@@ -75,13 +75,7 @@ def table(rows, **kwargs) -> None:
 
 def section(key: str, s: dict) -> None:
     v = s[key]
-    if key == "journey":
-        st.markdown("Claims through each step, for this scope and period. Drafts and pending claims use their "
-                    "date of service; submitted claims use the period you picked.")
-        bar(v, "stage", "claims", "Claims", keep_order=True)
-        with st.expander("Table"):
-            table(v)
-    elif key == "denials_by_code":
+    if key == "denials_by_code":
         cols = st.columns(2)
         with cols[0]:
             bar(v, "issue", "denials", "Denials")
@@ -164,7 +158,7 @@ def section(key: str, s: dict) -> None:
 # ---------- page ----------
 
 def reports_page(data_dir: Path, frame, assessments: dict, queue: list, patient_agency: dict,
-                 agency: str | None, all_agencies: list[str], drafts: list[dict]) -> None:
+                 agency: str | None, all_agencies: list[str]) -> None:
     with st.form("report_scope"):
         cols = st.columns([1, 2, 1, 1])
         field = cols[0].radio("Period by", ["service_date", "submitted_date"],
@@ -186,7 +180,7 @@ def reports_page(data_dir: Path, frame, assessments: dict, queue: list, patient_
         return
     field, start, end, scoped_agency = params
     s = compute(frame, assessments, data_dir, field=field, start=start, end=end, agency=scoped_agency,
-                queue=queue, patient_agency=patient_agency, drafts=drafts)
+                queue=queue, patient_agency=patient_agency)
 
     sc = s["scope"]
     st.markdown(f"### {sc['agency']} · {'dates of service' if field == 'service_date' else 'submitted'} "
@@ -217,7 +211,7 @@ def reports_page(data_dir: Path, frame, assessments: dict, queue: list, patient_
     st.markdown("## All statistics" if highlights else "## Statistics")
     for key in STAT_TITLES:
         if key not in shown:
-            with st.expander(STAT_TITLES[key], expanded=not highlights and key == "journey"):
+            with st.expander(STAT_TITLES[key]):
                 section(key, s)
 
 
