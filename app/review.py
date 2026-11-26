@@ -109,6 +109,10 @@ class ReviewItem:
         return self.assessment["status"] == "needs_review"
 
     @property
+    def review_reasons(self) -> list[str]:
+        return self.assessment.get("review_reasons", [])
+
+    @property
     def leading(self) -> Finding | None:
         """The first finding that needs a person, else the first finding (checker priority order)."""
         human = [f for f in self.findings if not f.auto]
@@ -120,7 +124,7 @@ class ReviewItem:
 
     @property
     def auto_only(self) -> bool:
-        return bool(self.findings) and all(f.auto for f in self.findings)
+        return not self.review_reasons and bool(self.findings) and all(f.auto for f in self.findings)
 
     @property
     def payer_name(self) -> str:

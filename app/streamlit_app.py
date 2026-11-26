@@ -201,7 +201,8 @@ def base_columns(i: ReviewItem) -> dict:
 
 
 def person_columns(i: ReviewItem) -> dict:
-    return {"Needs a person": labels(f for f in i.findings if not f.auto), **base_columns(i),
+    reasons = [f.label for f in i.findings if not f.auto] + i.review_reasons
+    return {"Needs a person": ", ".join(reasons), **base_columns(i),
             "Other issues": labels(f for f in i.findings if f.auto)}
 
 
@@ -228,7 +229,7 @@ def result_banner(ws: dict) -> None:
     (st.warning if result["still"] or result["knock_on"] else st.success)("Re-checked. " + " ".join(parts))
 
 
-def claim_panel(ws: dict, name: str, item: ReviewItem) -> None:
+def claim_panel(ws: dict, name: str, item: ReviewItem, widget_scope: str) -> None:
     """Detail pane: claim summary, each finding with its fix or action, and the evidence."""
     v = st.session_state.version
     r = item.row
@@ -240,8 +241,10 @@ def claim_panel(ws: dict, name: str, item: ReviewItem) -> None:
             f"{r['units']} units · ${item.billed_amount:,.2f} · authorization {r['auth_id'] or 'none'} · "
             f"filing deadline: {days_label(item.days_to_deadline).lower()}{drafted}"
         )
-        if not item.findings:
+        if not item.needs_review:
             st.badge("Ready to submit", color="green")
+        if item.review_reasons:
+            st.warning("Needs review: " + "; ".join(item.review_reasons))
         ordered = item.findings
         if item.leading:
             ordered = [item.leading] + [f for f in item.findings if f is not item.leading]
@@ -252,7 +255,7 @@ def claim_panel(ws: dict, name: str, item: ReviewItem) -> None:
             with head[1]:
                 st.badge("One-click fix" if f.auto else "Needs a person", color="green" if f.auto else "red")
             st.markdown(f.message)
-            key = f"{name}_{item.claim_id}_{f.code}_{v}"
+            key = f"{widget_scope}_{item.claim_id}_{f.code}_{v}"
             if f.auto:
                 cols = st.columns([4, 1])
                 cols[0].markdown(f"**{f.fix_text}**")
@@ -312,7 +315,7 @@ def show_panel(ws, name, items, clicked, slot, empty_text):
         return
     item = clicked or {i.claim_id: i for i in items}.get(st.session_state.get(slot))
     if item:
-        claim_panel(ws, name, item)
+        claim_panel(ws, name, item, widget_scope=slot)
     else:
         st.markdown("Click on any claim to see its details.")
 
@@ -347,7 +350,7 @@ def review_workspace(ws: dict, name: str, items: list[ReviewItem], ready_label: 
         manual = [i for i in review if not i.auto_only]
         one_click = [i for i in review if i.auto_only]
     else:
-        manual = [i for i in review if any(not f.auto for f in i.findings)]
+        manual = [i for i in review if not i.auto_only]
         one_click = [i for i in review if any(f.auto for f in i.findings)]
 
     m = st.columns(4)

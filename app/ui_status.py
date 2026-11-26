@@ -69,7 +69,7 @@ def status_page(data_dir: Path, agency: str, frame, assessments: dict, visits: d
             st.markdown(intro[g])
             group_tab(data_dir, g, items, done, as_of, visits, auths)
     with tabs[-1]:
-        resubmissions_tab(resubmissions, agency)
+        resubmissions_tab(data_dir, resubmissions, agency)
 
 
 def columns_for(group: str, as_of, done):
@@ -85,7 +85,9 @@ def columns_for(group: str, as_of, done):
             extra = {"Fix": " ".join(f.fix_text for f in d.item.findings),
                      "Deadline": status.deadline_status(d.item, as_of)[0]}
         elif group == "person":
-            extra = {"Needs someone": ", ".join(f.label for f in d.item.findings if not f.auto)}
+            extra = {"Needs someone": ", ".join(
+                [f.label for f in d.item.findings if not f.auto] + d.item.review_reasons
+            )}
         else:
             extra = {"Payer's remark": d.remark}
         return {"Payer said": payer_said, **extra, **base(d), "Status": done.get(d.claim_id, "")}
@@ -116,6 +118,16 @@ def group_tab(data_dir, group, items, done, as_of, visits, auths) -> None:
         st.markdown("Click on any claim to see its details.")
 
 
+def correction_outcome(assessment: dict) -> dict:
+    """Translate the checker's assessment into a corrected-claim export status."""
+    code = assessment["predicted_denial_code"] or ""
+    return {
+        "predicted": "paid" if assessment["status"] == "ready_to_submit" else "denied" if code else "needs review",
+        "predicted_code": code,
+        "review_reasons": assessment["review_reasons"],
+    }
+
+
 def prepare(data_dir, items, as_of) -> None:
     """Build corrected claims, re-check them as of today, save them and log the resubmissions."""
     corrections = [status.correction(d.item, as_of) for d in items]
@@ -123,9 +135,8 @@ def prepare(data_dir, items, as_of) -> None:
         checked = status.check_corrections(data_dir, corrections)
     entries = []
     for d, claim in zip(items, corrections):
-        a = checked.get(claim["claim_id"], {})
-        code = a.get("predicted_denial_code") or ""
-        entries.append({"claim": claim, "predicted": "denied" if code else "paid", "predicted_code": code,
+        outcome = correction_outcome(checked[claim["claim_id"]])
+        entries.append({"claim": claim, **outcome,
                         "deadline": status.deadline_status(d.item, as_of)[0]})
     status.save_resubmissions(entries)
     activity.append([{
@@ -135,10 +146,13 @@ def prepare(data_dir, items, as_of) -> None:
         "billed_amount": d.item.billed_amount} for d, e in zip(items, entries)])
     late = sum(e["predicted_code"] == "D03" for e in entries)
     ok = sum(e["predicted"] == "paid" for e in entries)
+    review = sum(e["predicted"] == "needs review" for e in entries)
+    other_denials = len(entries) - ok - late - review
     st.session_state["status_message"] = (
         f"Prepared {len(entries)} corrected claim(s). Re-checked as of {as_of.isoformat()}: {ok} would be paid"
         + (f", {late} are past the filing deadline and would be denied as late" if late else "")
-        + (f", {len(entries) - ok - late} still fail another check" if len(entries) - ok - late else "")
+        + (f", {other_denials} still fail another check" if other_denials else "")
+        + (f", {review} need manual review" if review else "")
         + ". See the Resubmissions tab.")
     st.session_state.version += 1
     st.rerun()
@@ -155,6 +169,8 @@ def panel(data_dir, d, as_of, done, visits, auths) -> None:
             f"{r['units']} units · ${item.billed_amount:,.2f} · submitted {parse_date(r['submitted_date']).isoformat()}  \n"
             f"**Payer's decision:** denied {d.payer_code} · “{md(d.remark)}”"
         )
+        if item.review_reasons:
+            st.warning("Needs review: " + "; ".join(item.review_reasons))
         if d.claim_id in done:
             st.badge(done[d.claim_id].capitalize(), color="green")
         if d.group == "quick":
@@ -224,12 +240,17 @@ def log(d, event: str, action: str) -> None:
                       "follow_up": "", "result": "", "remaining_codes": [], "billed_amount": d.item.billed_amount}])
 
 
-def resubmissions_tab(entries: list[dict], agency: str) -> None:
+def resubmissions_tab(data_dir: Path, entries: list[dict], agency: str) -> None:
     if not entries:
         st.markdown("No corrected claims prepared yet. Use **Quick fix & resubmit** to prepare them.")
         return
+    if any("review_reasons" not in entry for entry in entries):
+        claims = {entry["claim"]["claim_id"]: entry["claim"] for entry in entries}
+        checked = status.check_corrections(data_dir, list(claims.values()))
+        entries = [{**entry, **correction_outcome(checked[entry["claim"]["claim_id"]])} for entry in entries]
     table = pd.DataFrame([{**e["claim"], "predicted": e["predicted"], "predicted_code": e["predicted_code"],
-                           "deadline": e["deadline"]} for e in entries])
+                           "review_reasons": "; ".join(e["review_reasons"]), "deadline": e["deadline"]}
+                          for e in entries])
     m = st.columns(3)
     m[0].metric("Corrected claims", len(table))
     m[1].metric("Would be paid", int((table["predicted"] == "paid").sum()))
