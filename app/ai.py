@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Callable, List, Literal, Optional
 
@@ -162,6 +163,8 @@ def run_tool(name: str, args: dict, data_dir: Path, frame, test_rule: Callable |
 # ---------- calling Claude ----------
 
 def client() -> anthropic.Anthropic:
+    if not any(os.getenv(name, "").strip() for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")):
+        raise RuntimeError("Claude is not configured. Set ANTHROPIC_API_KEY and restart Streamlit.")
     return anthropic.Anthropic()
 
 
