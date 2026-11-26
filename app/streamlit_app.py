@@ -483,6 +483,8 @@ with st.sidebar:
 HOME = "Home"
 if st.session_state.get("page_for") != user:
     st.session_state.page_for, st.session_state.page = user, HOME
+if is_rules_team and st.session_state.page == "Statistics":
+    st.session_state.page = HOME
 page = st.session_state.page
 
 
@@ -508,8 +510,7 @@ if page == HOME:
         tile(cols[0], "Approve new rules", f"{new_bulletins} new bulletin(s)",
              "Review payer bulletin proposals and see which pending claims would be affected.", "News")
         with cols[1].container(border=True, height=230):
-            st.button("Monitoring", disabled=True)
-            st.caption("Coming soon")
+            st.button("Monitoring (Coming soon)", disabled=True)
     else:
         frame, _ = history_analysis(rules_key())
         mine = frame[frame["agency_id"] == agency]
