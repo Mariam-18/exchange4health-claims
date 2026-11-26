@@ -29,12 +29,19 @@ flowchart TD
     E -->|Yes| G["Needs review with findings and suggested actions"]
 ```
 
-## Which issues need human review?
+## Issues drafting prevents
 
-| Handling | Issues and action |
-|---|---|
-| Resolved during drafting | Calculate payer-supported units from verified time (D09), set Harbor’s required modifier (D04), and fill the authorization ID when exactly one record covers the visit (D07 and D08). The prototype also applies the inferred Summit whole-hour rule (D10). |
-| Human action required | For insufficient authorization balance (D02), show requested units, remaining units, and the shortfall. The agency verifies the balance or obtains authorization for the additional units. Missing or ambiguous authorizations and missing or unverified visit evidence also require review. |
-| Human review initially, with a possible automation later | For a duplicate (D05), show the prior submission so the agency can tell a repeat entry from a legitimate correction. A future workflow could block confirmed duplicate new claims automatically. For the Harbor cap (D06), show the excess units and proposed billed amount, then let the agency confirm one or several reductions. A future visit record could capture documented non-billable breaks and subtract them from billable time before drafting. |
+- **Overbilling verified time (D09)** — calculates units from verified minutes using payer rules.
+- **Wrong or missing Harbor modifier (D04)** — sets the required modifier.
+- **Missing or invalid authorization ID (D07/D08)** — fills the ID when exactly one authorization covers the visit.
+- **Partial-hour Summit billing (D10)** — applies the inferred whole-hour rule.
 
-After a Harbor reduction, rerun the checker so the draft still has to pass the authorization check and other applicable rules. See the [drafter tests and results](../testing/README.md#claim-drafter-testing).
+## Issues that still need review
+
+- **Missing or unverified visit (D01)** — drafting needs verified visit evidence.
+- **Missing or ambiguous authorization** — the agency must identify the right authorization.
+- **Insufficient authorization units (D02)** — the agency must verify the balance or obtain more units.
+- **Possible duplicate (D05)** — the agency must check whether an earlier claim needs correcting.
+- **Harbor daily cap exceeded (D06)** — the agency must confirm any reduction.
+
+See the [drafter tests and results](../testing/README.md#claim-drafter-testing).
