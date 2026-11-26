@@ -1,4 +1,4 @@
-"""Alerts page: new payer bulletins and unexpected denials for the rules team; rule-change notices for agencies."""
+"""Payer bulletin approvals and agency rule-change notices."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from app import ai, monitoring, rules_admin
-from app.analysis import unexpected_groups
+from app import ai, rules_admin
 from checker.claim_checker import read_rows
 
-PAYER_SHORT = {"PY01": "Northwind", "PY02": "Harbor", "PY03": "Summit"}
+RULE_LABELS = {"filing_limit": "Filing deadline", "weekend_modifier": "Modifier change",
+               "whole_hour_units": "Whole-hour billing"}
 
 
 def agency_alerts(agency: str) -> None:
@@ -32,39 +32,24 @@ def agency_alerts(agency: str) -> None:
             )
 
 
-def rules_team_alerts(data_dir: Path, rules: dict, frame) -> bool:
-    """Bulletins and unexpected denials awaiting a decision. Returns True if rules changed."""
+def rules_team_alerts(data_dir: Path, rules: dict) -> bool:
+    """Show the bulletin inbox, active rules, and past decisions."""
     agencies = {r["claim_id"]: r["agency_id"] for r in read_rows(data_dir / "claims_to_check.csv")}
     bulletins = rules_admin.list_bulletins(data_dir)
-    new_bulletins = [b for b in bulletins if b["status"] == "new"]
-    handled = {c["title"] for c in rules_admin.read_changes()
-               if c["kind"] == "unexpected" and c["decision"] in ("dismissed", "asked payer")}
-    groups = [g for g in unexpected_groups(frame) if g["key"] not in handled]
-
-    m = st.columns(3)
-    m[0].metric("New bulletins", len(new_bulletins))
-    m[1].metric("Unexpected denial groups", len(groups))
-    m[2].metric("Decisions logged", len(rules_admin.read_changes()))
-
-    tabs = st.tabs([f"Bulletins ({len(new_bulletins)} new)", f"Unexpected denials ({len(groups)})",
-                    "Rules in force", "Decision log", "Demo controls"])
-    with tabs[0]:
+    inbox, active, decisions = st.tabs(["Bulletins", "Rules in force", "Decision log"])
+    with inbox:
         changed = bulletin_section(data_dir, rules, bulletins, agencies)
-    with tabs[1]:
-        changed = unexpected_section(data_dir, rules, frame, groups) or changed
-    with tabs[2]:
+    with active:
         rules_section(rules)
-    with tabs[3]:
+    with decisions:
         log = rules_admin.read_changes()
         if log:
-            st.dataframe(pd.DataFrame([{k: c[k] for k in ("timestamp", "kind", "title", "decision", "summary", "note")}
-                                       for c in reversed(log)]), hide_index=True, width="stretch")
+            columns = ("timestamp", "kind", "title", "decision", "summary", "note")
+            st.dataframe(pd.DataFrame([{k: c[k] for k in columns} for c in reversed(log)]),
+                         hide_index=True, width="stretch")
         else:
             st.markdown("No decisions yet.")
-    with tabs[4]:
-        changed = demo_controls(rules) or changed
     return changed
-
 
 
 def md(text: str) -> str:
@@ -86,41 +71,34 @@ def bulletin_section(data_dir, rules, bulletins, agencies) -> bool:
         st.markdown("No bulletins.")
         return False
     order = {"new": 0, "approved": 1, "in rules": 2}
-    for b in sorted(bulletins, key=lambda b: order.get(b["status"], 3)):
-        with st.expander(f"{b['name']} · {b['status']}", expanded=b["status"] == "new"):
-            left, right = st.columns([2, 3])
-            with left:
-                st.markdown(b["text"])
-            with right:
-                if b["status"] == "new":
-                    if bulletin_proposal(data_dir, rules, b, agencies):
-                        return True
-                else:
-                    st.markdown(f"Status: **{b['status']}**.")
+    for bulletin in sorted(bulletins, key=lambda b: order.get(b["status"], 3)):
+        with st.container(border=True):
+            st.markdown(f"### {md(bulletin['title'])}")
+            st.caption(bulletin["status"].capitalize())
+            with st.expander("Original bulletin"):
+                st.markdown(bulletin["text"])
+            if bulletin["status"] == "new" and bulletin_proposal(data_dir, rules, bulletin, agencies):
+                return True
     return False
 
 
 def bulletin_proposal(data_dir, rules, bulletin, agencies) -> bool:
     key = f"bulletin_{bulletin['name']}"
-    if st.button("Read with Claude", key=f"read_{key}", type="primary") or st.session_state.get(key):
+    reading = st.session_state.get(key)
+    if not isinstance(reading, dict):
+        reading = None
+    action = "Read again" if reading else "Read with Claude"
+    if st.button(action, key=f"read_{key}", type="primary" if not reading else "secondary"):
         try:
             with st.spinner("Claude is reading the bulletin…"):
-                out = ai.read_bulletin(bulletin["name"], bulletin["text"], rules,
-                                       refresh=st.session_state.pop(f"refresh_{key}", False))
+                out = ai.read_bulletin(bulletin["name"], bulletin["text"], rules, refresh=bool(reading))
         except Exception as error:
             st.error(f"Couldn't read the bulletin: {error}")
             return False
-        st.session_state[key] = True
-    else:
-        st.markdown("Claude reads the bulletin and proposes a rule change. Nothing changes until you approve it.")
+        reading = st.session_state[key] = out["result"]
+    if not reading:
         return False
 
-    reading = out["result"]
-    st.markdown(f"**Claude's reading:** {md(reading['summary'])}")
-    st.caption(f"{'Saved result' if out['from_cache'] else 'New result'} from {out['created'][:16].replace('T', ' ')} · {out['model']}")
-    if st.button("Read again", key=f"again_{key}"):
-        st.session_state[f"refresh_{key}"] = True
-        st.rerun()
     if reading["outcome"] != "rule_change":
         st.warning(("Needs a developer: " if reading["outcome"] == "needs_developer" else "No rule change: ")
                    + md(reading["reason_if_no_change"]))
@@ -138,20 +116,12 @@ def bulletin_proposal(data_dir, rules, bulletin, agencies) -> bool:
     for n, proposal in enumerate(reading["changes"]):
         change = {k: proposal[k] for k in ("rule_type", "payer", "days", "service_code", "modifier",
                                            "effective_from", "effective_to")}
-        title = next((line.lstrip("# ").strip() for line in bulletin["text"].splitlines() if line.startswith("#")),
-                     bulletin["name"].removesuffix(".md"))
-        change["source"] = title
-        st.divider()
-        st.markdown(f"**Proposed rule:** {rules_admin.describe_change(change)}")
-        st.markdown(md(proposal["explanation"]))
-        st.markdown("**From the bulletin:**")
-        for quote in proposal["evidence_quotes"]:
-            st.markdown(f"> {md(quote)}")
+        change["source"] = bulletin["title"]
         problems = rules_admin.validate_change(change, bulletin["text"], proposal["evidence_quotes"])
         if problems:
             st.error("Can't approve: " + " ".join(problems))
             continue
-        if approval_block(data_dir, rules, change, agencies, f"{key}_{n}", "bulletin", bulletin["name"]):
+        if approval_block(data_dir, rules, change, agencies, f"{key}_{n}", bulletin["name"]):
             rules_admin.set_bulletin_status(bulletin["name"], "approved")
             return True
     if st.button("Reject", key=f"reject_{key}"):
@@ -161,46 +131,62 @@ def bulletin_proposal(data_dir, rules, bulletin, agencies) -> bool:
     return False
 
 
-def approval_block(data_dir, rules, change, agencies, key, kind, title, note: str = "") -> bool:
-    """Show the impact of a change, let the reviewer set an end date, and approve it. Returns True on approval."""
-    cols = st.columns([1, 1])
-    set_end = cols[0].checkbox("Set an end date", key=f"end_on_{key}")
-    default_end = date.fromisoformat(change.get("effective_to") or "2026-12-31")
-    end = cols[1].date_input("Rule ends after", value=default_end, key=f"end_{key}") if set_end else None
-    final = {**change, "effective_to": end.isoformat() if end else change.get("effective_to")}
+def rule_detail(change: dict) -> str:
+    """Describe the check without repeating the payer or service dates."""
+    if change["rule_type"] == "weekend_modifier":
+        return f"Require modifier {change['modifier']} for {change['service_code']} on Saturdays and Sundays."
+    if change["rule_type"] == "filing_limit":
+        return f"Submit within {change['days']} calendar days of the date of service."
+    return "Bill in whole hours, in multiples of 4 units."
+
+
+def approval_block(data_dir, rules, change, agencies, key, title) -> bool:
+    """Display a proposed rule and preview the pending claims it affects."""
+    st.markdown("#### Proposed rule")
+    st.markdown(f"**Applies to**  {rules_admin.PAYERS[change['payer']]}  \n"
+                f"**Rule**  {RULE_LABELS[change['rule_type']]}  \n"
+                f"**Detail**  {rule_detail(change)}")
+    st.markdown("**Period covered**")
+    dates = {}
+    cols = st.columns(2)
+    for column, field, label in zip(cols, ("effective_from", "effective_to"), ("Start", "End")):
+        suggested = change[field]
+        value = date.fromisoformat(suggested) if suggested else None
+        origin = f"Suggested by Claude: {value:%d %b %Y}." if value else f"{label} date unspecified in bulletin."
+        edited = column.date_input(f"{label} date", value=value, min_value=date(1900, 1, 1),
+                                   max_value=date(2100, 12, 31), key=f"{key}_{field}_{suggested}",
+                                   help=f"{origin} Edit or clear the date.")
+        if edited is None:
+            column.caption(f"{label} date unspecified")
+        dates[field] = edited.isoformat() if edited else None
+    final = {**change, **dates}
     problems = rules_admin.validate_change(final)
     if problems:
         st.error("Can't approve: " + " ".join(problems))
         return False
 
     overrides = rules_admin.overridden_rules(rules, final)
+    st.markdown("**Overrides**")
     if overrides:
-        section = rules_admin.RULE_SECTIONS[final["rule_type"]]
-        st.markdown("**Existing rules this would override**")
         for item in overrides:
-            old = item["rule"]
+            source = item["rule"].get("source") or "Existing rule"
             period = rules_admin.describe_period(item["from"], item["to"])
-            st.markdown(f"- {old.get('source') or 'Existing rule'} · "
-                        f"{rules_admin.describe_rule(section, old)} Replaced{period or ' for all service dates'}.")
+            st.markdown(f"- {md(source)}{period or ', for all service dates'}")
+    elif final["rule_type"] == "weekend_modifier":
+        st.write("Harbor’s standard U2 modifier for the covered weekends.")
+    else:
+        st.write("None")
 
     impact = cached_impact(data_dir, rules, final, agencies)
-    m = st.columns(3)
-    m[0].metric("Past claims predicted correctly",
-                f"{impact['history_correct_after']:,}",
-                delta=f"{impact['history_correct_after'] - impact['history_correct_before']:+,}")
-    m[1].metric("Past predictions changed", len(impact["history_changes"]),
-                help="Of these, how many now match what the payer did is shown below.")
-    m[2].metric("Pending claims affected", len(impact["pending_changes"]))
-    st.markdown(
-        f"{impact['history_changes_matching_payer']} of the {len(impact['history_changes'])} changed past predictions "
-        f"now match the payer's actual decision. Pending claims affected by agency: "
-        + (", ".join(f"{a} {n}" for a, n in sorted(impact["pending_by_agency"].items())) or "none") + "."
-    )
-    with st.expander("Claims whose prediction changes"):
-        st.dataframe(pd.DataFrame(impact["history_changes"]), hide_index=True, width="stretch")
-        st.dataframe(pd.DataFrame(impact["pending_changes"]), hide_index=True, width="stretch")
+    pending = impact["pending_changes"]
+    st.markdown(f"**Pending claims affected**  {len(pending):,}")
+    if pending:
+        with st.expander("View affected claims"):
+            st.dataframe(pd.DataFrame(pending).rename(columns={
+                "claim_id": "Claim", "agency": "Agency", "before": "Before", "after": "After",
+            }), hide_index=True, width="stretch")
     if st.button("Approve rule change", key=f"approve_{key}", type="primary"):
-        rules_admin.approve(kind, title, final, impact, note)
+        rules_admin.approve("bulletin", title, final, impact, data_dir=data_dir)
         return True
     return False
 
@@ -208,90 +194,10 @@ def approval_block(data_dir, rules, change, agencies, key, kind, title, note: st
 def cached_impact(data_dir, rules, change, agencies):
     key = ("impact", repr(sorted(change.items())), repr(rules))
     if key not in st.session_state:
-        with st.spinner("Replaying past and pending claims with the proposed rule…"):
+        with st.spinner("Checking pending claims…"):
             st.session_state[key] = rules_admin.impact(data_dir, rules, rules_admin.apply_change(rules, change), agencies)
     return st.session_state[key]
 
-
-# ---------- unexpected denials ----------
-
-def unexpected_section(data_dir, rules, frame, groups) -> bool:
-    st.markdown(
-        "Denials the payer made with a code the checker didn't predict, grouped by payer, code and remark "
-        "(at least 5 claims). A growing group can mean a payer rule we don't know about."
-    )
-    if not groups:
-        st.markdown("No unexpected denial groups.")
-        return False
-    for g in groups:
-        title = (f"{PAYER_SHORT.get(g['payer'], g['payer'])} · {g['denial_code']} · “{g['remark']}” · "
-                 f"{g['claims']} claims · ${g['billed_amount']:,.2f}")
-        with st.expander(title):
-            st.markdown(f"Dates of service {g['first_service_date']} to {g['last_service_date']}. The checker predicted: "
-                        + ", ".join(f"{k} {v}" for k, v in g["predicted"].items()) + ".")
-            key = f"investigate_{g['key']}"
-            if st.button("Investigate with Claude", key=f"btn_{key}", type="primary") or st.session_state.get(key):
-                st.session_state[key] = True
-                try:
-                    with st.spinner("Claude is working through the claims history…"):
-                        out = monitoring.investigate(data_dir, rules, frame, g,
-                                                     refresh=st.session_state.pop(f"refresh_{key}", False))
-                except Exception as error:
-                    st.error(f"Investigation failed: {error}")
-                    continue
-                if show_investigation(data_dir, rules, g, out, key):
-                    return True
-    return False
-
-
-def show_investigation(data_dir, rules, group, out, key) -> bool:
-    result = out["result"]
-    outcome = {"rule_proposed": "Proposed rule", "no_pattern": "No pattern found", "ask_payer": "Ask the payer"}
-    st.markdown(f"**{outcome[result['outcome']]}.** {md(result['interpretation'])}")
-    st.markdown("**Why, from the data:**")
-    for reason in result["why"]:
-        st.markdown(f"- {md(reason)}")
-    st.markdown(f"**Suggestion:** {md(result['suggestion'])}")
-    st.caption(f"{'Saved result' if out['from_cache'] else 'New result'} from {out['created'][:16].replace('T', ' ')} · "
-               f"{out['model']} · {len(out['tool_calls'])} tool calls")
-    with st.expander("How Claude worked this out"):
-        for n, call in enumerate(out["tool_calls"], 1):
-            st.markdown(f"**{n}. {call['name']}** `{call['input']}`")
-            st.json(call["output"], expanded=False)
-    if st.button("Investigate again", key=f"again_{key}"):
-        st.session_state[f"refresh_{key}"] = True
-        st.rerun()
-
-    proposal = result.get("proposed_change")
-    if result["outcome"] == "rule_proposed" and proposal:
-        change = {k: proposal[k] for k in ("rule_type", "payer", "days", "service_code", "modifier",
-                                           "effective_from", "effective_to")}
-        change["source"] = f"Inferred from denial remarks: {group['remark']}"
-        st.divider()
-        st.markdown(f"**Proposed rule (inferred):** {rules_admin.describe_change(change)}")
-        bt = out.get("backtest", {})
-        if bt and "error" not in bt:
-            st.markdown(f"Python's backtest: explains **{bt['group_claims_explained']} of {bt['group_claims']}** claims "
-                        f"in this group and would wrongly flag **{bt['paid_claims_wrongly_flagged']}** paid claims.")
-        problems = rules_admin.validate_change(change)
-        if problems:
-            st.error("Can't approve: " + " ".join(problems))
-        else:
-            agencies = {r["claim_id"]: r["agency_id"] for r in read_rows(data_dir / "claims_to_check.csv")}
-            if approval_block(data_dir, rules, change, agencies, key, "unexpected", group["key"],
-                              note="Inferred rule; confirm with the payer."):
-                return True
-    cols = st.columns(2)
-    if cols[0].button("Ask the payer", key=f"payer_{key}"):
-        rules_admin.record_change("unexpected", group["key"], {}, {}, "asked payer", result["suggestion"])
-        st.rerun()
-    if cols[1].button("Dismiss", key=f"dismiss_{key}"):
-        rules_admin.record_change("unexpected", group["key"], {}, {}, "dismissed", result["interpretation"])
-        st.rerun()
-    return False
-
-
-# ---------- rules list and demo controls ----------
 
 def rules_section(rules: dict) -> None:
     st.markdown("Dated payer rules the checker reads from its settings. Other rules (EVV, units, authorizations, "
@@ -302,21 +208,3 @@ def rules_section(rules: dict) -> None:
         for entry in rules.get(section, []):
             rows.append({"Rule": rules_admin.describe_rule(section, entry), "Source": entry["source"]})
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-
-
-def demo_controls(rules: dict) -> bool:
-    st.markdown("Set up the demo scenarios. These change the app's rules, not the repository's.")
-    if st.button("Treat the Harbor weekend-modifier bulletin as new"):
-        rules_admin.save_rules(rules_admin.remove_rules(rules, "weekend_modifiers", payer="PY02"))
-        rules_admin.set_bulletin_status("PY02_harbor_bulletin_2026-08.md", "new")
-        return True
-    if st.button("Remove the inferred Summit whole-hour rule"):
-        rules_admin.save_rules(rules_admin.remove_rules(rules, "whole_hour_units", payer="PY03"))
-        return True
-    if st.button("Restore the repository's rules"):
-        rules_admin.reset_rules()
-        return True
-    if st.button("Clear the decision log", help="Agencies' rule-change notices are cleared too."):
-        rules_admin.clear_changes()
-        return True
-    return False

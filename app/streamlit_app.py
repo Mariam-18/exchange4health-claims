@@ -97,7 +97,7 @@ def history_analysis(rules_json: str):
 
 
 def rules_key() -> str:
-    return json.dumps(rules_admin.current_rules(), sort_keys=True)
+    return json.dumps(rules_admin.current_rules(Path(data_dir)), sort_keys=True)
 
 
 @st.cache_data
@@ -447,7 +447,7 @@ workspaces = st.session_state.workspaces
 if "check" not in workspaces:
     workspaces["check"] = new_workspace(load_pending(Path(data_dir)), with_history=True)
 
-set_rules(rules_admin.current_rules())
+set_rules(rules_admin.current_rules(Path(data_dir)))
 RULES_TEAM = "Exchange4Health rules team"
 
 # Mock sign-in: an agency billing team sees only its own claims; the rules team sees alerts and all agencies.
@@ -505,11 +505,11 @@ if page == HOME:
     if is_rules_team:
         new_bulletins = sum(b["status"] == "new" for b in rules_admin.list_bulletins(Path(data_dir)))
         cols = st.columns(2)
-        tile(cols[0], "News & approvals", f"{new_bulletins} new bulletin(s)",
-             "Payer bulletins and denials the rules didn't predict, read and investigated by Claude for your approval.",
-             "News")
-        tile(cols[1], "Statistics", "All agencies", "Standard statistics by period and agency, with Claude's review.",
-             "Statistics")
+        tile(cols[0], "Approve new rules", f"{new_bulletins} new bulletin(s)",
+             "Review payer bulletin proposals and see which pending claims would be affected.", "News")
+        with cols[1].container(border=True, height=230):
+            st.button("Monitoring", disabled=True)
+            st.caption("Coming soon")
     else:
         frame, _ = history_analysis(rules_key())
         mine = frame[frame["agency_id"] == agency]
@@ -602,8 +602,7 @@ elif page == "Statistics":
 
 elif page in ("News", "News & approvals"):
     if is_rules_team:
-        frame, _ = history_analysis(rules_key())
-        if ui_alerts.rules_team_alerts(Path(data_dir), rules_admin.current_rules(), frame):
+        if ui_alerts.rules_team_alerts(Path(data_dir), rules_admin.current_rules(Path(data_dir))):
             st.rerun()
     else:
         ui_alerts.agency_alerts(agency)

@@ -23,6 +23,8 @@ APP_RULES_FILE = STATE_DIR / "rule_settings.json"
 CHANGES_FILE = STATE_DIR / "rule_changes.jsonl"
 BULLETIN_STATUS_FILE = STATE_DIR / "bulletin_status.json"
 PASTED_DIR = STATE_DIR / "bulletins"
+HARBOR_SAMPLE = "PY02_harbor_bulletin_2026-08.md"
+HARBOR_SAMPLE_SOURCE = "Harbor Provider Notice 2026-08"
 
 RULE_TYPES = {
     "filing_limit": "Claims must be received within N calendar days of the date of service, for dates of service in a period.",
@@ -34,11 +36,14 @@ PAYERS = {"PY01": "Northwind Health Plan", "PY02": "Harbor Medicaid Plan", "PY03
 
 # ---------- rules in force ----------
 
-def current_rules() -> dict:
+def current_rules(data_dir: Path | None = None) -> dict:
     """Rules the app applies: the approved app copy if one exists, else the repository default."""
     if APP_RULES_FILE.exists():
         return json.loads(APP_RULES_FILE.read_text(encoding="utf-8"))
-    return load_rules()
+    baseline = load_rules()
+    if data_dir is not None and harbor_sample(data_dir) is not None:
+        baseline = remove_rules(baseline, "weekend_modifiers", payer="PY02", source=HARBOR_SAMPLE_SOURCE)
+    return baseline
 
 
 def save_rules(rules: dict) -> None:
@@ -271,21 +276,36 @@ def clear_changes() -> None:
         CHANGES_FILE.unlink()
 
 
-def approve(kind: str, title: str, change: dict, result: dict, note: str = "") -> None:
+def approve(kind: str, title: str, change: dict, result: dict, note: str = "",
+            *, data_dir: Path | None = None) -> None:
     """Apply an approved change to the app's rules and log it."""
-    save_rules(apply_change(current_rules(), change))
+    save_rules(apply_change(current_rules(data_dir), change))
     record_change(kind, title, change, result, "approved", note)
 
 
 # ---------- bulletins ----------
 
+def harbor_sample(data_dir: Path) -> Path | None:
+    """Find the Harbor sample in the data pack."""
+    paths = (data_dir / "payers" / HARBOR_SAMPLE, data_dir / HARBOR_SAMPLE)
+    return next((path for path in paths if path.is_file()), None)
+
+
 def list_bulletins(data_dir: Path) -> list[dict]:
-    """Bulletins from the data pack plus any pasted in the app, with their review status."""
+    """List the Harbor example and any bulletins pasted into the app."""
     status = bulletin_status()
+    sample = harbor_sample(data_dir)
+    paths = ([sample] if sample else []) + sorted(PASTED_DIR.glob("*.md"))
     found = []
-    for path in sorted((data_dir / "payers").glob("*bulletin*.md")) + sorted(PASTED_DIR.glob("*.md")):
-        found.append({"name": path.name, "path": path, "text": path.read_text(encoding="utf-8"),
-                      "status": status.get(path.name, "in rules" if path.parent.name == "payers" else "new")})
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        title = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), path.stem)
+        initial = "in rules" if path == sample and any(
+            entry.get("source") == HARBOR_SAMPLE_SOURCE
+            for entry in current_rules(data_dir).get("weekend_modifiers", [])
+        ) else "new"
+        found.append({"name": path.name, "title": title, "text": text,
+                      "status": status.get(path.name, initial)})
     return found
 
 

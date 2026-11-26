@@ -66,3 +66,5 @@ export E4H_DATA_DIR="/path/to/data-pack"
 ```
 
 Open [localhost:8501](http://localhost:8501). Choose **Agency AG009** or **Exchange4Health rules team** and enter any password. To use the Claude features, set `ANTHROPIC_API_KEY` before starting the app.
+
+The rules-team demo starts with the Harbor weekend-modifier bulletin awaiting approval when it is in the data pack. The standalone checker uses the full baseline rules for the assessment predictions.
