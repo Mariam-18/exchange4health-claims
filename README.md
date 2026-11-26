@@ -25,6 +25,18 @@ flowchart TD
     S --> P["Payer pays or denies"]
 ```
 
+### New rule workflow
+
+```mermaid
+flowchart TD
+    B["Payer publishes a bulletin"] --> A["Claude reads it and proposes a rule"]
+    A --> V["Python validates the proposal and tests claim impact"]
+    V --> R["Exchange4Health rules team reviews and approves"]
+    R --> N["Agencies see the change in News"]
+```
+
+The checker uses the approved rule from its effective date. Each agency's News page shows the rule change and how many of its pending claims are affected.
+
 ## What each piece does
 
 - **[Checker](checker/README.md)** checks existing claims against payer rules, visit evidence, authorizations, and earlier submissions. It predicts the outcome, shows the evidence for each issue, and suggests what to fix. [Download the assessment predictions](predictions.csv) or see the [historical test](testing/README.md).
