@@ -122,8 +122,9 @@ def analysis_tools(include_test_rule: bool) -> list[dict]:
              "field": {"type": "string", "enum": sorted(analysis.NUMERIC)}, "filters": FILTERS_SCHEMA},
              "required": ["field"]}},
         {"name": "timeline",
-         "description": "All visits and claims, in date order, for one patient, caregiver, or the patient behind a claim. "
-                        "Use it to trace a case study.",
+         "description": "Trace a patient, caregiver, or the patient behind a claim. Claim events use the current "
+                        "scope. EVV visits can come from any date in the available data. The tool returns up "
+                        "to 80 events in date order.",
          "input_schema": {"type": "object", "properties": {
              "kind": {"type": "string", "enum": ["patient", "caregiver", "claim"]}, "id": {"type": "string"}},
              "required": ["kind", "id"]}},
@@ -299,7 +300,8 @@ stat_keys: the keys of the statistics that back it up (e.g. "rebilled_claims"). 
 a real pattern exists. Report patterns that hold up, and say plainly when something you checked turned out to be \
 noise.
 3. For your strongest findings, trace one or two case studies with the timeline tool (a patient, caregiver or \
-claim) and cite their IDs.
+claim) and cite their IDs. Label any visits outside the report period as historical context and give their dates. \
+Keep those visits out of report-period counts and conclusions about what happened during the period.
 4. Give a practical suggestion for each finding: a process change, a conversation with caregivers, a question for \
 a payer, or a rule to review.
 
@@ -316,7 +318,7 @@ def review_report(scope: str, stats: dict, known: str, data_dir: Path, frame,
     """Ask Claude to pick the statistics to highlight and explore patterns behind them."""
     user = (f"Scope and period: {scope}\n\nWhat's already known:\n<known>\n{known}\n</known>\n\n"
             f"Standard statistics (JSON):\n{json.dumps(stats, indent=1, default=str)}\n\n"
-            "The tools work on claims within this scope and period.")
+            "Claim statistics use this scope and period. The timeline can also show EVV visits from other dates.")
     tools = analysis_tools(include_test_rule=False)
     return cached("report", [REPORT_SYSTEM, agency, scope, stats, known],
                   lambda: call(REPORT_SYSTEM, user, ReportReview, tools=tools, effort="high",
@@ -331,6 +333,8 @@ the checker's prediction, EVV visit details and caregivers.
 - Use only numbers returned by the Python tools or supplied in the Python statistics. For each number, keep the metric, group, and period tied to the source. If asked how a number was obtained, give the exact tool name and input arguments (including filters and grouping) that produced it. If the result cannot be reproduced with those inputs, leave it out.
 - Answer in a few plain sentences, leading with the direct answer. Name claims, patients or caregivers where \
 that helps.
+- When tracing a claim, you may use earlier EVV visits from the timeline. If the scope has a date range, label \
+any visits outside it as historical context, give their dates, and keep them out of counts for that period.
 - If the data can't answer the question, say so and say what it can tell them instead.
 - Codes: D01 no verified visit, D02 authorization used up, D03 late filing, D04 modifier, D05 duplicate, \
 D06 Harbor daily cap, D07 missing authorization number, D08 wrong authorization, D09 units over verified time, \
