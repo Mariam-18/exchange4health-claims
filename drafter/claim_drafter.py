@@ -28,6 +28,7 @@ SERVICE_RATES = {
     "S5125": Decimal("5.40"),
     "T1005": Decimal("4.80"),
 }
+DUPLICATE_DRAFT_PREFIX = "Duplicate: "
 HARBOR_DAILY_CAP = 32
 READY = "ready to submit"
 NEEDS_REVIEW = "needs review"
@@ -59,7 +60,12 @@ class Decision:
     reduction_review: tuple
 
 
-def construct(data_dir, authorizations, verified_seconds, agencies):
+def construct(data_dir, authorizations, verified_seconds, agencies, *, submitted_claims=()):
+    """Build drafts and report visit groups skipped, including matches to submitted claims."""
+    submitted_by_key = {}
+    for claim in submitted_claims:
+        submitted_by_key.setdefault(claim.duplicate_key, claim.claim_id)
+
     coverage = defaultdict(list)
     for auth_id, auth in authorizations.items():
         coverage[auth.patient_id, auth.service_code].append((auth_id, auth))
@@ -107,6 +113,11 @@ def construct(data_dir, authorizations, verified_seconds, agencies):
             units -= units % 4
         if units <= 0:
             skipped.append((key, agency, "no billable units"))
+            continue
+
+        prior_id = submitted_by_key.get((auth.payer, *key))
+        if prior_id is not None:
+            skipped.append((key, agency, f"{DUPLICATE_DRAFT_PREFIX}claim {prior_id} was already submitted"))
             continue
 
         modifier = expected_modifier(auth.payer, service, service_date) or ""
@@ -214,7 +225,11 @@ def experiment(data_dir, output_dir, *, check_history=False, confirmed_claim_ids
         for row in read_rows(data_dir / "claims_to_check.csv")
     }
     authorizations, verified_seconds = load_evidence(data_dir)
-    drafts, skipped, summit_adjustments = construct(data_dir, authorizations, verified_seconds, agencies)
+    existing = [entry for entries in by_key.values() for entry in entries] if check_history else ()
+    drafts, skipped, summit_adjustments = construct(
+        data_dir, authorizations, verified_seconds, agencies,
+        submitted_claims=(claim for claim, _ in existing),
+    )
     generated = {draft.claim.duplicate_key for draft in drafts}
     if len(generated) != len(drafts):
         raise ValueError("Multiple generated claims share a payer/patient/service/date key")
@@ -222,7 +237,6 @@ def experiment(data_dir, output_dir, *, check_history=False, confirmed_claim_ids
     results = []
     counts = Counter()
     actions_by_scenario = defaultdict(Counter)
-    existing = [entry for entries in by_key.values() for entry in entries] if check_history else ()
     base_replay = list(simulate(drafts, authorizations, verified_seconds, existing=existing))
     confirmed_replay = list(simulate(
         drafts, authorizations, verified_seconds, existing=existing,
@@ -352,7 +366,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data_dir", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--check-history", action="store_true", help="Include recorded submissions in duplicate and usage checks.")
+    parser.add_argument("--check-history", action="store_true", help="Block drafts for recorded submissions and include their usage in checks.")
     parser.add_argument("--confirm-claim", action="append", default=[], help="Model confirming the reduction for this draft ID.")
     args = parser.parse_args()
     experiment(args.data_dir, args.output_dir, check_history=args.check_history, confirmed_claim_ids=set(args.confirm_claim))

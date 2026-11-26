@@ -45,6 +45,7 @@ from app import rules_admin, ui_alerts, ui_reports, ui_status  # noqa: E402
 from app.ui_common import days_label, filter_claims, worklist  # noqa: E402
 from app.analysis import build_frame  # noqa: E402
 from checker.claim_checker import parse_date, read_rows, replay_all, rules_in_force, set_rules  # noqa: E402
+from drafter.claim_drafter import DUPLICATE_DRAFT_PREFIX  # noqa: E402
 
 DEFAULT_DATA = ROOT / "Resonance_assessment_day__confirmation_and_preparation" / "Resonance - graduate preparation data"
 FIRST_SERVICE_DATE, LAST_SERVICE_DATE = date(2026, 6, 1), date(2026, 11, 30)
@@ -81,7 +82,6 @@ def run_checker(rows: tuple, with_history: bool, rules_json: str) -> list[dict]:
         return assess(Path(data_dir), [dict(r) for r in rows], with_history=with_history)
 
 
-@st.cache_data(show_spinner="Drafting claims from EVV visits…")
 def draft_rows(agency: str, last_date: date, rules_json: str):
     with rules_in_force(json.loads(rules_json)):
         return build_drafts(Path(data_dir), agency, last_date)
@@ -102,7 +102,7 @@ def all_drafts(rules_json: str) -> list[dict]:
     rows = []
     with rules_in_force(json.loads(rules_json)):
         for ag in sorted({r["agency_id"] for r in read_rows(Path(data_dir) / "claims_history.csv")}):
-            drafted, _ = build_drafts(Path(data_dir), ag, LAST_SERVICE_DATE)
+            drafted, _ = build_drafts(Path(data_dir), ag, LAST_SERVICE_DATE, block_duplicates=False)
             if drafted:
                 checked = {a["claim_id"]: a for a in assess(Path(data_dir), drafted, with_history=False)}
                 rows += [{"agency": ag, "service_date": d["date_of_service"], "billed": float(d["billed_amount"]),
@@ -571,7 +571,8 @@ elif page == "Draft claims":
         generate = cols[1].form_submit_button("Generate claims", type="primary")
     if generate and len(picked) == 2:
         start, end = picked
-        rows, failed = draft_rows(agency, end, rules_key())
+        with st.spinner("Drafting claims from EVV visits…"):
+            rows, failed = draft_rows(agency, end, rules_key())
         workspaces["draft"] = new_workspace(rows, with_history=False, start=start, end=end, failed=failed)
         st.session_state.version += 1
 
@@ -587,8 +588,12 @@ elif page == "Draft claims":
         f"{long_date(ws['end'].isoformat())}. Authorization balances include drafts for earlier dates."
     )
     failed = [f for f in ws["failed"] if ws["start"] <= f[2] <= ws["end"]]
+    duplicate_count = sum(reason.startswith(DUPLICATE_DRAFT_PREFIX) for _, _, _, reason in failed)
+    if duplicate_count:
+        label = "claim was" if duplicate_count == 1 else "claims were"
+        st.caption(f"{duplicate_count} {label} not created because a matching claim was already submitted.")
     if failed:
-        with st.expander(f"Couldn't draft {len(failed)} visit group(s)"):
+        with st.expander(f"Skipped visit groups ({len(failed)})"):
             st.dataframe(pd.DataFrame(failed, columns=["Patient", "Service", "Date of service", "Reason"]),
                          hide_index=True, width="stretch")
     review_workspace(ws, "draft", in_range, "drafted claims ready to submit", f"drafted_claims_{agency}.csv")

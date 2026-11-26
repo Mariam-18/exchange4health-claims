@@ -427,6 +427,8 @@ def assess(data_dir: Path, rows: list[dict], *, with_history: bool = True) -> li
 
     with_history=False replays the rows on their own, as if they replaced the recorded claims.
     """
+    if not rows:
+        return []
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         for name in ("authorizations.csv", "evv_visits.csv"):
@@ -448,18 +450,20 @@ def load_pending(data_dir: Path) -> list[dict]:
     return read_rows(data_dir / "claims_to_check.csv")
 
 
-def build_drafts(data_dir: Path, agency: str, last_service_date: date):
-    """Draft claims from verified EVV for one agency, for dates of service up to the given date.
+def build_drafts(data_dir: Path, agency: str, last_service_date: date, *, block_duplicates: bool = True):
+    """Return draft rows and skipped visit groups for one agency through the given date.
 
-    Output: (claim rows in submission order, list of (patient, service, date, reason) that couldn't be drafted).
-    Earlier dates are included so authorization balances and daily totals are correct.
+    Set block_duplicates to False for the historical replacement replay.
     """
+    history = read_rows(data_dir / "claims_history.csv")
     agencies = {}
-    for row in read_rows(data_dir / "claims_history.csv"):
+    for row in history:
         agencies.setdefault(row["patient_id"], set()).add(row["agency_id"])
     authorizations, verified_seconds = load_evidence(data_dir)
-    drafts, skipped, _ = construct(data_dir, authorizations, verified_seconds, agencies)
-    visit_ids = {}
+    submitted = (Claim.from_row(row) for row in history) if block_duplicates else ()
+    drafts, skipped, _ = construct(
+        data_dir, authorizations, verified_seconds, agencies, submitted_claims=submitted,
+    )
     mine = [d for d in drafts if d.agency == agency and d.claim.service_date <= last_service_date]
     mine.sort(key=lambda d: (d.claim.submission_date, d.claim.service_date, d.claim.patient_id, d.claim.service_code))
     rows = []
