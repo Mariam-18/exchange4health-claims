@@ -251,12 +251,6 @@ def show_investigation(data_dir, rules, group, out, key) -> bool:
     st.markdown("**Why, from the data:**")
     for reason in result["why"]:
         st.markdown(f"- {md(reason)}")
-    check = out["number_check"]
-    if check["unverified"]:
-        st.warning(f"{len(check['unverified'])} of {check['stated']} numbers Claude stated weren't found in the data "
-                   f"it retrieved: {md(', '.join(check['unverified']))}. Check these before acting.")
-    else:
-        st.markdown(f"All {check['stated']} numbers Claude stated were found in the data it retrieved.")
     st.markdown(f"**Suggestion:** {md(result['suggestion'])}")
     st.caption(f"{'Saved result' if out['from_cache'] else 'New result'} from {out['created'][:16].replace('T', ' ')} · "
                f"{out['model']} · {len(out['tool_calls'])} tool calls")

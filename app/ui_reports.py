@@ -192,7 +192,8 @@ def reports_page(data_dir: Path, frame, assessments: dict, queue: list, patient_
     m[3].metric("Billed amount denied", f"${sc['denied_billed']:,.2f}")
 
     scope_text = f"{sc['agency']}, {'dates of service' if field == 'service_date' else 'submitted'} {start} to {end}"
-    ask_box("reports", scope_text, data_dir, in_period(frame, field, start, end, scoped_agency))
+    ask_box("reports", scope_text, data_dir, in_period(frame, field, start, end, scoped_agency),
+            agency=scoped_agency)
 
     review = claude_review(data_dir, frame, s, field, start, end, scoped_agency)
     highlights = (review or {}).get("result", {}).get("highlights", [])
@@ -227,29 +228,22 @@ def claude_review(data_dir, frame, s, field, start, end, agency):
         st.session_state[key] = "refresh"
     if not st.session_state.get(key):
         st.markdown("Claude picks the statistics worth attention, digs into what looks unusual with the analysis "
-                    "tools, and traces case studies. Every number it states is checked against the data.")
+                    "tools, and traces case studies.")
         return None
     part = in_period(frame, field, start, end, agency)
-    saved = INVESTIGATION_LOG.read_text(encoding="utf-8") if INVESTIGATION_LOG.exists() else ""
+    log = INVESTIGATION_LOG.with_name(f"investigation_log_{agency}.md") if agency else INVESTIGATION_LOG
+    saved = log.read_text(encoding="utf-8") if log.exists() else ""
     known = "\n\n".join(filter(None, (HISTORICAL_FINDINGS, saved)))
     try:
         with st.spinner("Claude is reviewing the statistics and exploring the claims…"):
-            out = ai.review_report(scope, s, known, data_dir, part, refresh=st.session_state[key] == "refresh")
+            out = ai.review_report(scope, s, known, data_dir, part,
+                                   refresh=st.session_state[key] == "refresh", agency=agency)
     except Exception as error:
         st.error(f"Review failed: {error}")
         return None
     st.session_state[key] = "shown"
     result = out["result"]
     st.markdown(f"**{md(result['headline'])}**")
-    texts = [result["headline"], *[f"{h['title']} {h['summary']}" for h in result.get("highlights", [])]]
-    for finding in result["findings"]:
-        texts += [finding["observation"], finding["interpretation"], finding["suggestion"], *finding["evidence"]]
-    check = ai.check_numbers(texts, [s, [c["output"] for c in out["tool_calls"]]])
-    if check["unverified"]:
-        st.warning(f"{len(check['unverified'])} of {check['stated']} numbers weren't found in the statistics or tool "
-                   f"results: {md(', '.join(check['unverified']))}. Check these before sharing.")
-    else:
-        st.markdown(f"All {check['stated']} numbers Claude stated were found in the statistics or tool results.")
     st.caption(f"{'Saved result' if out['from_cache'] else 'New result'} from {out['created'][:16].replace('T', ' ')} · "
                f"{out['model']} · {len(out['tool_calls'])} tool calls")
 
@@ -264,7 +258,7 @@ def claude_review(data_dir, frame, s, field, start, end, agency):
             if finding["case_studies"]:
                 st.markdown("Case studies: " + md(", ".join(finding["case_studies"])))
             if st.button("Add to investigation log", key=f"log_{key}_{n}"):
-                append_finding(scope, finding)
+                append_finding(log, scope, finding)
                 st.success("Added to the investigation log.")
     with st.expander("How Claude worked this out"):
         for n, call in enumerate(out["tool_calls"], 1):
@@ -273,11 +267,11 @@ def claude_review(data_dir, frame, s, field, start, end, agency):
     return out
 
 
-def append_finding(scope: str, finding: dict) -> None:
-    """Append an approved finding to the investigation log."""
-    INVESTIGATION_LOG.parent.mkdir(parents=True, exist_ok=True)
-    new_file = not INVESTIGATION_LOG.exists()
-    with INVESTIGATION_LOG.open("a", encoding="utf-8") as stream:
+def append_finding(log: Path, scope: str, finding: dict) -> None:
+    """Append an approved finding to the investigation log for this scope."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not log.exists()
+    with log.open("a", encoding="utf-8") as stream:
         if new_file:
             stream.write("# Investigation log\n\nFindings from report reviews, added after a person approved them.\n")
         evidence = "\n".join(f"  - {e}" for e in finding["evidence"])

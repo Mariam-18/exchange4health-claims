@@ -51,6 +51,4 @@ def investigate(data_dir: Path, rules: dict, frame, group: dict, refresh: bool =
     proposal = out["result"].get("proposed_change")
     if proposal:
         out["backtest"] = backtest(data_dir, rules, group, {k: v for k, v in proposal.items() if k != "explanation"})
-    texts = [out["result"]["interpretation"], out["result"]["suggestion"], *out["result"]["why"]]
-    out["number_check"] = ai.check_numbers(texts, [group, [c["output"] for c in out["tool_calls"]]])
     return out

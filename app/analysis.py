@@ -176,8 +176,16 @@ def distribution(frame: pd.DataFrame, field: str, filters: dict | None = None) -
     }
 
 
-def timeline(data_dir: Path, frame: pd.DataFrame, kind: str, identifier: str) -> dict:
-    """Events in date order for a patient, caregiver or claim: visits, claims and their outcomes."""
+def timeline(data_dir: Path, frame: pd.DataFrame, kind: str, identifier: str,
+             *, agency: str | None = None) -> dict:
+    """Return a timeline of visits and claims, scoped to the agency when supplied."""
+    allowed_patients = None
+    if agency is not None:
+        frame = frame[frame["agency_id"] == agency]
+        owners = defaultdict(set)
+        for row in read_rows(data_dir / "claims_history.csv"):
+            owners[row["patient_id"]].add(row["agency_id"])
+        allowed_patients = {patient for patient, agencies in owners.items() if agencies == {agency}}
     if kind == "claim":
         match = frame[frame["claim_id"] == identifier]
         if match.empty:
@@ -187,6 +195,8 @@ def timeline(data_dir: Path, frame: pd.DataFrame, kind: str, identifier: str) ->
         raise ValueError("kind must be patient, caregiver or claim")
     events = []
     for v in read_rows(data_dir / "evv_visits.csv"):
+        if allowed_patients is not None and v["patient_id"] not in allowed_patients:
+            continue
         if (kind == "patient" and v["patient_id"] == identifier) or (kind == "caregiver" and v["caregiver_id"] == identifier):
             events.append({"date": v["clock_in"][:10], "event": "visit", "visit_id": v["visit_id"],
                            "patient": v["patient_id"], "caregiver": v["caregiver_id"], "service": v["service_code"],

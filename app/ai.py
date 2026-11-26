@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Callable, List, Literal, Optional
 
@@ -145,7 +144,8 @@ def analysis_tools(include_test_rule: bool) -> list[dict]:
     return tools
 
 
-def run_tool(name: str, args: dict, data_dir: Path, frame, test_rule: Callable | None) -> dict:
+def run_tool(name: str, args: dict, data_dir: Path, frame, test_rule: Callable | None,
+             *, agency: str | None = None) -> dict:
     if name == "breakdown":
         return analysis.breakdown(frame, args.get("filters"), args.get("group_by", []))
     if name == "sample_claims":
@@ -153,7 +153,7 @@ def run_tool(name: str, args: dict, data_dir: Path, frame, test_rule: Callable |
     if name == "distribution":
         return analysis.distribution(frame, args["field"], args.get("filters"))
     if name == "timeline":
-        return analysis.timeline(data_dir, frame, args["kind"], args["id"])
+        return analysis.timeline(data_dir, frame, args["kind"], args["id"], agency=agency)
     if name == "test_rule" and test_rule:
         return test_rule(args)
     raise ValueError(f"Unknown tool {name}")
@@ -269,9 +269,8 @@ explains most of the group and wrongly flags few or no paid claims.
 Outcomes: rule_proposed (with proposed_change), no_pattern (nothing in the data separates these claims; set \
 proposed_change to null), or ask_payer (the remarks point to a rule we can't express or can't confirm from the data).
 
-Every item in `why` must state numbers returned by the tools (counts, rates, dates). Don't state numbers you \
-didn't get from a tool. Treat patterns in fewer than 10 claims as weak. Keep interpretation and suggestion short \
-and plain."""
+Use only numbers returned by the Python tools or supplied in the Python statistics. For each number, keep the metric, group, and period tied to the source. If asked how a number was obtained, give the exact tool name and input arguments (including filters and grouping) that produced it. If the result cannot be reproduced with those inputs, leave it out.
+Treat patterns in fewer than 10 claims as weak. Keep interpretation and suggestion short and plain."""
 
 
 def investigate(group: dict, data_dir: Path, frame, rules: dict, test_rule: Callable, refresh: bool = False) -> dict:
@@ -281,7 +280,7 @@ def investigate(group: dict, data_dir: Path, frame, rules: dict, test_rule: Call
             f"Filter for exactly these claims: {{\"payer\": \"{group['payer']}\", \"denial_code\": "
             f"\"{group['denial_code']}\", \"remark_contains\": {json.dumps(group['remark'])}, \"unexpected\": true}}")
     tools = analysis_tools(include_test_rule=True)
-    return cached("investigation", [group["key"], group["claims"], rules],
+    return cached("investigation", [INVESTIGATION_SYSTEM, group["key"], group["claims"], rules],
                   lambda: call(INVESTIGATION_SYSTEM, user, Investigation, tools=tools, effort="high",
                                tool_runner=lambda n, a: run_tool(n, a, data_dir, frame, test_rule)),
                   refresh)
@@ -305,62 +304,28 @@ Use what's already known (below) to interpret, without repeating it as new. For 
 against an 8-hour cap suggest unpaid breaks inside the shift; unit gaps under 30 minutes are usually rounding; \
 late filing is about the agency's process, not caregivers.
 
-Every evidence item must state numbers from the statistics or tool results. Don't state numbers you didn't get \
-from them. Treat patterns in fewer than 10 claims as weak and say so. Write plainly and briefly."""
+Use only numbers returned by the Python tools or supplied in the Python statistics. For each number, keep the metric, group, and period tied to the source. If asked how a number was obtained, give the exact tool name and input arguments (including filters and grouping) that produced it. If the result cannot be reproduced with those inputs, leave it out.
+Treat patterns in fewer than 10 claims as weak and say so. Write plainly and briefly."""
 
 
-def review_report(scope: str, stats: dict, known: str, data_dir: Path, frame, refresh: bool = False) -> dict:
+def review_report(scope: str, stats: dict, known: str, data_dir: Path, frame,
+                  refresh: bool = False, *, agency: str | None = None) -> dict:
     """Ask Claude to pick the statistics to highlight and explore patterns behind them."""
     user = (f"Scope and period: {scope}\n\nWhat's already known:\n<known>\n{known}\n</known>\n\n"
             f"Standard statistics (JSON):\n{json.dumps(stats, indent=1, default=str)}\n\n"
             "The tools work on claims within this scope and period.")
     tools = analysis_tools(include_test_rule=False)
-    return cached("report", ["v2", scope, stats, known],
+    return cached("report", [REPORT_SYSTEM, agency, scope, stats, known],
                   lambda: call(REPORT_SYSTEM, user, ReportReview, tools=tools, effort="high",
-                               tool_runner=lambda n, a: run_tool(n, a, data_dir, frame, None)),
+                               tool_runner=lambda n, a: run_tool(n, a, data_dir, frame, None, agency=agency)),
                   refresh)
-
-
-# ---------- checking Claude's numbers ----------
-
-NUMBER = re.compile(r"(?<![\w.-])\$?(\d[\d,]*(?:\.\d+)?)(%?)(?![\w-])")
-
-
-def numbers_in(text: str) -> list[tuple[float, bool, str]]:
-    """Numbers in text as (value, is_percent, original), skipping years, dates, IDs and values up to 12."""
-    text = re.sub(r"\d{4}-\d{2}(-\d{2})?", " ", text)
-    found = []
-    for match in NUMBER.finditer(text):
-        raw, pct = match.group(1).replace(",", ""), bool(match.group(2))
-        value = float(raw)
-        if value in (2026, 2027) or (value <= 12 and not pct):
-            continue
-        found.append((value, pct, match.group(0)))
-    return found
-
-
-def check_numbers(texts: list[str], sources: list) -> dict:
-    """Which numbers Claude stated can be found in the data it was given or retrieved.
-
-    A number matches if it equals a source number. Percentages may differ by up to 0.5 and dollar amounts
-    by up to $1 (rounding).
-    """
-    source_values = {v for v, _, _ in numbers_in(json.dumps(sources, default=str))}
-    source_values |= {float(x) for x in re.findall(r"\d+(?:\.\d+)?", json.dumps(sources, default=str))}
-    stated = [n for text in texts for n in numbers_in(text)]
-    def tolerance(pct: bool, orig: str) -> float:
-        return 0.51 if pct else (1.0 if orig.startswith("$") else 0.001)
-
-    unverified = sorted({orig for value, pct, orig in stated
-                         if not any(abs(value - s) < tolerance(pct, orig) for s in source_values)})
-    return {"stated": len(stated), "unverified": unverified}
 
 
 ASK_SYSTEM = """You answer questions from a home care billing team about their claims, using the analysis \
 tools over the claims history for the given scope. Each claim has a payer outcome (paid or denied with a code), \
 the checker's prediction, EVV visit details and caregivers.
 
-- Use the tools to get the numbers. Don't state numbers you didn't get from a tool.
+- Use only numbers returned by the Python tools or supplied in the Python statistics. For each number, keep the metric, group, and period tied to the source. If asked how a number was obtained, give the exact tool name and input arguments (including filters and grouping) that produced it. If the result cannot be reproduced with those inputs, leave it out.
 - Answer in a few plain sentences, leading with the direct answer. Name claims, patients or caregivers where \
 that helps.
 - If the data can't answer the question, say so and say what it can tell them instead.
@@ -369,10 +334,10 @@ D06 Harbor daily cap, D07 missing authorization number, D08 wrong authorization,
 D10 Summit whole hours, D99 other. Payers: PY01 Northwind, PY02 Harbor, PY03 Summit."""
 
 
-def ask(question: str, scope: str, data_dir: Path, frame) -> dict:
+def ask(question: str, scope: str, data_dir: Path, frame, *, agency: str | None = None) -> dict:
     """Answer a free-text question about claims in scope with the analysis tools."""
     user = f"Scope: {scope}\n\nQuestion: {question}"
     tools = analysis_tools(include_test_rule=False)
-    return cached("ask", [scope, question.strip().lower(), len(frame)],
+    return cached("ask", [ASK_SYSTEM, agency, scope, question.strip().lower(), len(frame)],
                   lambda: call(ASK_SYSTEM, user, Answer, tools=tools, effort="medium",
-                               tool_runner=lambda n, a: run_tool(n, a, data_dir, frame, None)))
+                               tool_runner=lambda n, a: run_tool(n, a, data_dir, frame, None, agency=agency)))

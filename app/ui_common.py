@@ -50,8 +50,8 @@ def filter_claims(items: list, key: str, visits: dict) -> list:
     return shown
 
 
-def ask_box(key: str, scope: str, data_dir: Path, frame: pd.DataFrame) -> None:
-    """Ask a question about claims; Claude answers with the analysis tools and the numbers are checked."""
+def ask_box(key: str, scope: str, data_dir: Path, frame: pd.DataFrame, *, agency: str | None = None) -> None:
+    """Ask Claude a question and show the data returned by its analysis tools."""
     with st.container(border=True):
         st.markdown(f"**Ask about your claims** · {scope}")
         with st.form(f"ask_{key}", clear_on_submit=False, border=False):
@@ -64,24 +64,23 @@ def ask_box(key: str, scope: str, data_dir: Path, frame: pd.DataFrame) -> None:
             return
         try:
             with st.spinner("Claude is looking through the claims…"):
-                out = ai.ask(question, scope, data_dir, frame)
+                out = ai.ask(question, scope, data_dir, frame, agency=agency)
         except Exception as error:
             st.error(f"Couldn't answer: {error}")
             return
         result = out["result"]
         st.markdown(md(result["answer"]))
-        check = ai.check_numbers([result["answer"]], [c["output"] for c in out["tool_calls"]])
-        if check["unverified"]:
-            st.warning(f"{len(check['unverified'])} of {check['stated']} numbers weren't found in the data Claude "
-                       f"retrieved: {md(', '.join(check['unverified']))}.")
-        elif check["stated"]:
-            st.caption(f"All {check['stated']} numbers checked against the data.")
         tables = [table_from(c["output"]) for c in out["tool_calls"]]
         tables = [t for t in tables if t is not None and len(t)]
         if tables:
             with st.expander("Data behind this answer"):
                 for t in tables:
                     st.dataframe(t, hide_index=True, width="stretch")
+        if out["tool_calls"]:
+            with st.expander("Queries used"):
+                for call in out["tool_calls"]:
+                    st.markdown(f"`{call['name']}`")
+                    st.json(call["input"], expanded=False)
 
 
 def table_from(output) -> pd.DataFrame | None:

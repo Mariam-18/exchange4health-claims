@@ -43,7 +43,7 @@ def status_page(data_dir: Path, agency: str, frame, assessments: dict, visits: d
                 f"**{long_date(as_of.isoformat())}**, the latest submission date in the data.")
     ribbon(len(paid), len(denied_frame), paid["billed_amount"].sum(), denied_frame["billed_amount"].sum())
 
-    ask_box("status", f"{agency}, all submitted claims", data_dir, mine)
+    ask_box("status", f"{agency}, all submitted claims", data_dir, mine, agency=agency)
 
     unexpected = set(frame.loc[frame["unexpected"], "claim_id"])
     denied = status.denied_claims(rows, assessments, unexpected, agency)

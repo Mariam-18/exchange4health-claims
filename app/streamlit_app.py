@@ -610,10 +610,16 @@ elif page in ("News", "News & approvals"):
 
 with st.sidebar:
     st.divider()
-    predictions = pd.DataFrame([{
-        "claim_id": i.claim_id,
-        "status": "denied" if i.assessment["failed_checks"] else "paid",
-        "denial_code": i.assessment["predicted_denial_code"] or "",
-    } for i in queue_for(workspaces["check"])])
-    st.download_button("predictions.csv (all agencies)", predictions.to_csv(index=False),
-                       "predictions.csv", "text/csv")
+    predictions = pd.DataFrame([
+        {
+            "claim_id": i.claim_id,
+            "status": "denied" if i.assessment["failed_checks"] else "paid",
+            "denial_code": i.assessment["predicted_denial_code"] or "",
+        }
+        for i in queue_for(workspaces["check"])
+        if is_rules_team or i.row["agency_id"] == agency
+    ], columns=["claim_id", "status", "denial_code"])
+    export_name = "predictions.csv" if is_rules_team else f"predictions_{agency}.csv"
+    export_scope = "all agencies" if is_rules_team else agency
+    st.download_button(f"Download predictions ({export_scope})", predictions.to_csv(index=False),
+                       export_name, "text/csv")
