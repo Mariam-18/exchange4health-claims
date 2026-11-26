@@ -492,7 +492,7 @@ def go(target: str) -> None:
 
 
 def tile(column, title: str, figure: str, text: str, target: str) -> None:
-    with column.container(border=True, height=230):
+    with column.container(border=True):
         st.markdown(f"### {title}")
         st.markdown(f"**{figure}**")
         st.markdown(text)
