@@ -163,7 +163,27 @@ def bulletin_proposal(data_dir, rules, bulletin, agencies) -> bool:
 
 def approval_block(data_dir, rules, change, agencies, key, kind, title, note: str = "") -> bool:
     """Show the impact of a change, let the reviewer set an end date, and approve it. Returns True on approval."""
-    impact = cached_impact(data_dir, rules, change, agencies)
+    cols = st.columns([1, 1])
+    set_end = cols[0].checkbox("Set an end date", key=f"end_on_{key}")
+    default_end = date.fromisoformat(change.get("effective_to") or "2026-12-31")
+    end = cols[1].date_input("Rule ends after", value=default_end, key=f"end_{key}") if set_end else None
+    final = {**change, "effective_to": end.isoformat() if end else change.get("effective_to")}
+    problems = rules_admin.validate_change(final)
+    if problems:
+        st.error("Can't approve: " + " ".join(problems))
+        return False
+
+    overrides = rules_admin.overridden_rules(rules, final)
+    if overrides:
+        section = rules_admin.RULE_SECTIONS[final["rule_type"]]
+        st.markdown("**Existing rules this would override**")
+        for item in overrides:
+            old = item["rule"]
+            period = rules_admin.describe_period(item["from"], item["to"])
+            st.markdown(f"- {old.get('source') or 'Existing rule'} · "
+                        f"{rules_admin.describe_rule(section, old)} Replaced{period or ' for all service dates'}.")
+
+    impact = cached_impact(data_dir, rules, final, agencies)
     m = st.columns(3)
     m[0].metric("Past claims predicted correctly",
                 f"{impact['history_correct_after']:,}",
@@ -179,11 +199,7 @@ def approval_block(data_dir, rules, change, agencies, key, kind, title, note: st
     with st.expander("Claims whose prediction changes"):
         st.dataframe(pd.DataFrame(impact["history_changes"]), hide_index=True, width="stretch")
         st.dataframe(pd.DataFrame(impact["pending_changes"]), hide_index=True, width="stretch")
-    cols = st.columns([1, 1])
-    set_end = cols[0].checkbox("Set an end date", key=f"end_on_{key}")
-    end = cols[1].date_input("Rule ends after", value=date(2026, 12, 31), key=f"end_{key}") if set_end else None
     if st.button("Approve rule change", key=f"approve_{key}", type="primary"):
-        final = {**change, "effective_to": end.isoformat() if end else change.get("effective_to")}
         rules_admin.approve(kind, title, final, impact, note)
         return True
     return False

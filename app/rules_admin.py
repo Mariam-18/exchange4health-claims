@@ -81,13 +81,26 @@ def describe_period(start: str | None, end: str | None) -> str:
     return ""
 
 
+RULE_SECTIONS = {
+    "filing_limit": "filing_limits",
+    "weekend_modifier": "weekend_modifiers",
+    "whole_hour_units": "whole_hour_units",
+}
+
+
+def rule_entry(change: dict) -> dict:
+    """Convert a proposed change to a stored rule."""
+    entry = {"payer": change["payer"], "from": change.get("effective_from"),
+             "to": change.get("effective_to"), "source": change.get("source", "")}
+    if change["rule_type"] == "filing_limit":
+        entry["days"] = change.get("days")
+    elif change["rule_type"] == "weekend_modifier":
+        entry.update(service_code=change.get("service_code"), modifier=change.get("modifier"))
+    return entry
+
+
 def describe_change(change: dict) -> str:
-    section = {"filing_limit": "filing_limits", "weekend_modifier": "weekend_modifiers",
-               "whole_hour_units": "whole_hour_units"}[change["rule_type"]]
-    entry = {"payer": change["payer"], "days": change.get("days"), "service_code": change.get("service_code"),
-             "modifier": change.get("modifier"), "from": change.get("effective_from"),
-             "to": change.get("effective_to")}
-    return describe_rule(section, entry)
+    return describe_rule(RULE_SECTIONS[change["rule_type"]], rule_entry(change))
 
 
 # ---------- applying a change ----------
@@ -108,14 +121,19 @@ def validate_change(change: dict, source_text: str | None = None, quotes: list[s
                 date.fromisoformat(change[key])
             except ValueError:
                 problems.append(f"{key} is not a date: {change[key]}")
+    start, end = change.get("effective_from"), change.get("effective_to")
+    if not problems and start and end and date.fromisoformat(end) < date.fromisoformat(start):
+        problems.append("The last service date must be on or after the first service date.")
     if change.get("rule_type") == "filing_limit" and not (isinstance(change.get("days"), int) and 0 < change["days"] <= 365):
         problems.append("Filing limit days must be a whole number from 1 to 365.")
     if change.get("rule_type") == "weekend_modifier":
         mod = change.get("modifier") or ""
         if not (len(mod) == 2 and mod.isalnum() and mod.isupper()):
             problems.append(f"Modifier must be two capital letters or digits: {mod!r}")
-        if not change.get("service_code"):
-            problems.append("A weekend modifier rule needs a service code.")
+        if (change.get("payer"), change.get("service_code")) != ("PY02", "T1019"):
+            problems.append("Weekend modifier rules are supported for Harbor personal care (T1019).")
+    if change.get("rule_type") == "whole_hour_units" and change.get("payer") != "PY03":
+        problems.append("Whole-hour rules are supported for Summit.")
     if source_text is not None:
         haystack = normalise(source_text)
         if not quotes:
@@ -130,30 +148,51 @@ def normalise(text: str) -> str:
     return " ".join(text.replace("*", "").replace("_", " ").lower().split())
 
 
+def rule_dates(entry: dict) -> tuple[date, date]:
+    """Return the inclusive bounds of a rule's service dates."""
+    start, end = entry.get("from"), entry.get("to")
+    return date.fromisoformat(start) if start else date.min, date.fromisoformat(end) if end else date.max
+
+
+def overridden_rules(rules: dict, change: dict) -> list[dict]:
+    """Return existing rules that the proposal replaces within the overlapping dates."""
+    section = RULE_SECTIONS[change["rule_type"]]
+    start, end = rule_dates(rule_entry(change))
+    replaced = []
+    for old in rules.get(section, []):
+        if old["payer"] != change["payer"]:
+            continue
+        if section == "weekend_modifiers" and old["service_code"] != change.get("service_code"):
+            continue
+        old_start, old_end = rule_dates(old)
+        overlap_start, overlap_end = max(start, old_start), min(end, old_end)
+        if overlap_start <= overlap_end:
+            replaced.append({
+                "rule": old,
+                "from": overlap_start.isoformat() if overlap_start != date.min else None,
+                "to": overlap_end.isoformat() if overlap_end != date.max else None,
+            })
+    return replaced
+
+
 def apply_change(rules: dict, change: dict) -> dict:
-    """Return new rule settings with the change added. A new filing limit ends the payer's open-ended one."""
+    """Apply a rule on its service dates and retain existing rules outside that period."""
+    section = RULE_SECTIONS[change["rule_type"]]
+    new_entry = rule_entry(change)
+    start, end = rule_dates(new_entry)
+    replaced = [item["rule"] for item in overridden_rules(rules, change)]
     updated = copy.deepcopy(rules)
-    start, end = change.get("effective_from"), change.get("effective_to")
-    if change["rule_type"] == "filing_limit":
-        limits = updated.setdefault("filing_limits", [])
-        if start:
-            day_before = (date.fromisoformat(start) - timedelta(days=1)).isoformat()
-            for entry in limits:
-                if entry["payer"] == change["payer"] and not entry.get("to") and (entry.get("from") or "") < start:
-                    entry["to"] = day_before
-        else:
-            limits[:] = [e for e in limits if e["payer"] != change["payer"]]
-        limits.append({"payer": change["payer"], "days": change["days"], "from": start, "to": end,
-                       "source": change["source"]})
-    elif change["rule_type"] == "weekend_modifier":
-        updated.setdefault("weekend_modifiers", []).append({
-            "payer": change["payer"], "service_code": change["service_code"], "modifier": change["modifier"],
-            "from": start, "to": end, "source": change["source"],
-        })
-    else:
-        updated.setdefault("whole_hour_units", []).append({
-            "payer": change["payer"], "from": start, "to": end, "source": change["source"],
-        })
+    entries = []
+    for old in updated.get(section, []):
+        if old not in replaced:
+            entries.append(old)
+            continue
+        old_start, old_end = rule_dates(old)
+        if old_start < start:
+            entries.append({**old, "to": (start - timedelta(days=1)).isoformat()})
+        if end < old_end:
+            entries.append({**old, "from": (end + timedelta(days=1)).isoformat()})
+    updated[section] = [*entries, new_entry]
     return updated
 
 

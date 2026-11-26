@@ -245,14 +245,15 @@ copied word for word. Don't paraphrase inside quotes.
 - effective_from and effective_to are dates of service (YYYY-MM-DD) the change covers. Use null when the bulletin \
 doesn't give one. Don't guess dates.
 - Fill only the fields the rule type uses; set the others to null.
-- explanation: one or two plain sentences on what changes for billers compared with the current rules.
+- explanation: say what changes for billers. If it overrides an existing rule, name that rule or its source \
+and state the service dates for which the override applies.
 - summary: one sentence on what the bulletin says."""
 
 
 def read_bulletin(name: str, text: str, rules: dict, refresh: bool = False) -> dict:
     """Ask Claude to turn a bulletin into proposed rule changes."""
     user = f"{catalogue_text(rules)}\n\nBulletin ({name}):\n<bulletin>\n{text}\n</bulletin>"
-    return cached("bulletin", [name, text, rules], lambda: call(BULLETIN_SYSTEM, user, BulletinReading), refresh)
+    return cached("bulletin", [BULLETIN_SYSTEM, name, text, rules], lambda: call(BULLETIN_SYSTEM, user, BulletinReading), refresh)
 
 
 INVESTIGATION_SYSTEM = """You investigate claims that a payer denied with a code the rules-based checker didn't \

@@ -2,9 +2,16 @@
 
 The checker evaluates existing claims against verified visits, authorizations, submission history, and payer rules. Each applicable check runs, and the payer’s priority determines the predicted denial code.
 
-These diagrams show the target workflow. The replay sorts by submission date and assumes earlier rows in the same CSV were submitted first when dates tie. Same-date claims from the other CSV can trigger review when their sequence matters. The [structured output](#structured-output) supplies the evidence used by the app.
+The [structured output](#structured-output) supplies the evidence used by the app.
 
 For the runnable historical evaluation, see the [testing guide](../testing/README.md).
+
+## Assumptions
+
+- **Summit whole-hour billing.** From 1 July 2026, Summit claims must bill in whole-hour increments of four 15-minute units. Drafting rounds verified billable time down to the nearest whole hour. For example, 1 hour 45 minutes supports 4 units. We inferred the requirement from historical denial remarks citing **Contract Amendment 3** and inferred the July start from the change in recorded outcomes.
+- **Harbor filing.** We apply the in-state HCBS filing exemption to every Harbor claim in the sample because the export has no provider-state field.
+- **Same-day submission order.** When submission dates tie within a CSV, earlier rows are treated as earlier submissions.
+- **Pending authorization usage.** Earlier pending claims predicted to be paid provisionally reduce the remaining units for later claims.
 
 #### 1. Payer and submission checks
 
