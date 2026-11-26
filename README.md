@@ -56,7 +56,7 @@ Claude helps scale this approach as payer rules change. It translates a bulletin
 
 ## Open the demo
 
-From the repository root, with Python 3.10 or later:
+From the repository root, with Python 3.9 or later:
 
 ```bash
 python3 -m venv .venv
