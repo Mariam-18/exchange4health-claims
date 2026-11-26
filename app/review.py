@@ -465,8 +465,12 @@ def build_drafts(data_dir: Path, agency: str, last_service_date: date, *, block_
         agencies.setdefault(row["patient_id"], set()).add(row["agency_id"])
     authorizations, verified_seconds = load_evidence(data_dir)
     submitted = (Claim.from_row(row) for row in history) if block_duplicates else ()
+    pending = (
+        Claim.from_row(row) for row in load_pending(data_dir) if row["agency_id"] == agency
+    ) if block_duplicates else ()
     drafts, skipped, _ = construct(
-        data_dir, authorizations, verified_seconds, agencies, submitted_claims=submitted,
+        data_dir, authorizations, verified_seconds, agencies,
+        submitted_claims=submitted, pending_claims=pending,
     )
     mine = [d for d in drafts if d.agency == agency and d.claim.service_date <= last_service_date]
     mine.sort(key=lambda d: (d.claim.submission_date, d.claim.service_date, d.claim.patient_id, d.claim.service_code))
