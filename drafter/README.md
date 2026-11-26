@@ -36,12 +36,18 @@ flowchart TD
 - **Missing or invalid authorization ID (D07/D08)** — fills the ID when exactly one authorization covers the visit.
 - **Partial-hour Summit billing (D10)** — applies the inferred whole-hour rule.
 
-## Issues that still need review
+## No draft created
 
-- **Missing or unverified visit (D01)** — drafting needs verified visit evidence.
-- **Missing or ambiguous authorization** — the agency must identify the right authorization.
+- **No verified visit** — drafting starts from verified EVV. With no matching visit record, there is nothing to draft. Pending and rejected visits are skipped.
+- **Missing or ambiguous authorization** — there must be exactly one matching authorization to build the draft.
+- **No billable units** — the verified time rounds down to zero under the payer’s rules.
+
+## Draft created but held for review
+
+The checker expects these drafts to be denied if submitted as written.
+
 - **Insufficient authorization units (D02)** — the agency must verify the balance or obtain more units.
-- **Possible duplicate (D05)** — the agency must check whether an earlier claim needs correcting.
+- **Possible duplicate (D05)** — a matching earlier submission in the records being checked may need correcting.
 - **Harbor daily cap exceeded (D06)** — the agency must confirm any reduction.
 
 See the [drafter tests and results](../testing/README.md#claim-drafter-testing).
