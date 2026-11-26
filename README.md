@@ -4,6 +4,8 @@ A prototype for home care agencies' billing teams. It checks claims against each
 
 On the synthetic data, the checker predicts the payer's paid or denied outcome for **3,768 of 3,830 historical claims (98.4%)**. Drafting claims from verified visits would have held **345 of 4,980 drafts (6.9%)** for review, against **1,099 of 3,830 claims (28.7%)** denied historically.
 
+**Start here:** [Assessment predictions](predictions.csv) · [Checker README and rule flowcharts](checker/README.md) · [Run the app](#how-to-run)
+
 ## The problem and what I tackled
 
 Agencies write each claim by hand from the visits their caregivers log in EVV, then submit it to one of several payers, each with its own rules. In the history, 28.7% of claims were denied, mostly for errors that were visible before submission: units above the verified visit time, late filing, missing or wrong authorizations, wrong modifiers.
@@ -73,7 +75,7 @@ Every claim list can be filtered by date of service, service, and patient, careg
 - Where both said denied, the denial code matched for 1,026 of 1,038 (98.8%).
 - All 61 missed denials are D99, which payer remarks don't explain.
 
-**Pending claims** (`claims_to_check.csv`, 546 claims): 377 (69.0%) predicted paid, 169 (31.0%) denied. 55 of the 169 have only one-click fixes. Applying all 55 clears 54. The other now uses an authorization with too few units left, and one other claim fails because of the changes. `predictions.csv` is in the format the data pack asks for.
+**Pending claims** (`claims_to_check.csv`, 546 claims): 377 (69.0%) predicted paid, 169 (31.0%) denied. 55 of the 169 have only one-click fixes. Applying all 55 clears 54. The other now uses an authorization with too few units left, and one other claim fails because of the changes. [Download `predictions.csv`](predictions.csv) in the format requested by the data pack.
 
 **AI checks** (run live on Claude Sonnet 5.5):
 - **Bulletins:** both real bulletins reproduce the hand-coded rules exactly. A made-up Summit 90-day notice maps correctly. A made-up telehealth bulletin is correctly returned as needing a new rule type.
@@ -137,7 +139,7 @@ Command line:
 - **Dates.** Filing limits and modifier rules are chosen by date of service. Claims submitted on the same date are processed in their row order within each file.
 - **Authorization use.** Units are drawn down by paid claims in submission order. Pending claims predicted to be paid count against later ones.
 - **Agencies.** Each patient belongs to one agency, as in the history. The EVV export has no agency.
-- **Rates.** Service rates are inferred from the history: T1019 $6.10, S5125 $5.40, T1005 $4.80 per unit.
+- **Billed amounts.** The prototype calculates billed amounts for drafts and unit edits using per-unit charges inferred from the synthetic claims history: T1019 $6.10, S5125 $5.40, and T1005 $4.80. These charges do not affect the checker’s predictions.
 - **Drafts.** A draft is submitted the day after the visit's last clock-out, so it's never late.
 
 Changes to the checker's decision logic are logged in [LOGIC_CHANGES.md](docs/LOGIC_CHANGES.md).
