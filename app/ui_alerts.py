@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -176,6 +177,12 @@ def approval_block(data_dir, rules, change, agencies, key, title) -> bool:
         st.write("Harbor’s standard U2 modifier for the covered weekends.")
     else:
         st.write("None")
+
+    with st.expander("Implementation details"):
+        section = rules_admin.RULE_SECTIONS[final["rule_type"]]
+        proposal = {section: [rules_admin.rule_entry(final)]}
+        st.caption("Rule entry the checker will use after approval.")
+        st.code(json.dumps(proposal, indent=2), language="json")
 
     impact = cached_impact(data_dir, rules, final, agencies)
     pending = impact["pending_changes"]
