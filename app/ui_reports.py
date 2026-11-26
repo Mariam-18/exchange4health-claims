@@ -15,8 +15,15 @@ from app.stats import STAT_TITLES, compute, in_period
 from app.ui_common import ask_box
 
 PRIMARY = "#1f4e79"
-ROOT = Path(__file__).resolve().parents[1]
-PROJECT_README = ROOT / "README.md"
+HISTORICAL_FINDINGS = """\
+| Finding in the synthetic replay | How it shaped the app |
+|---|---|
+| **Units over verified time (D09).** 73.8% of gaps were under 30 minutes. Of those, 89.6% matched rounding up to a 15- or 30-minute boundary. | Offer a one-click recalculation using the payer's rules for small gaps. Ask the agency to reconcile larger gaps with the visit. |
+| **Harbor daily cap (D06).** 96 of 106 flags were one hour over the cap. Of those 96, 93 matched a single EVV visit, and none matched multiple visits. A break within the logged shift is one possible explanation. | Offer a reduction for a single nine-hour claim with no other counted units that day. Recording non-billable breaks in EVV would let agencies address this at the source. |
+| **Missing or invalid authorization (D07/D08).** All 84 missing IDs and 80 invalid IDs in the replay had exactly one valid match for the payer, patient, service, and date. | Offer the matching ID and recheck the available balance before marking the claim ready. |
+
+Other tests helped rule out automatic fixes. Of 103 claims with no matching visit, only three had an unclaimed alternate-date candidate with compatible units within a week after checking both exports. All three came from the same block of unclaimed visit records. Caregiver changes near the missing dates were just as common in paid cases. The app asks someone to resolve missing visit evidence before changing a claim date.
+""".strip()
 INVESTIGATION_LOG = STATE_DIR / "investigation_log.md"
 FIRST, LAST = date(2026, 6, 1), date(2027, 2, 28)
 
@@ -229,11 +236,8 @@ def claude_review(data_dir, frame, s, field, start, end, agency):
                     "tools, and traces case studies. Every number it states is checked against the data.")
         return None
     part = in_period(frame, field, start, end, agency)
-    findings = PROJECT_README.read_text(encoding="utf-8").partition(
-        "## Findings that shaped the workflow\n"
-    )[2].partition("\n## ")[0].strip()
     saved = INVESTIGATION_LOG.read_text(encoding="utf-8") if INVESTIGATION_LOG.exists() else ""
-    known = "\n\n".join(filter(None, (findings, saved)))
+    known = "\n\n".join(filter(None, (HISTORICAL_FINDINGS, saved)))
     try:
         with st.spinner("Claude is reviewing the statistics and exploring the claims…"):
             out = ai.review_report(scope, s, known, data_dir, part, refresh=st.session_state[key] == "refresh")
