@@ -20,6 +20,8 @@ All 300 patients in `claims_history.csv` appeared under exactly one agency. The 
 
 ## 2. Check the draft
 
+The app checks the draft against recorded claims and earlier drafts. Previously paid claims reduce the available authorization balance.
+
 ```mermaid
 flowchart TD
     A["Take the completed draft"] --> C["Check remaining authorization units"]

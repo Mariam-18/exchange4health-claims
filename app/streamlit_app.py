@@ -573,7 +573,7 @@ elif page == "Draft claims":
         start, end = picked
         with st.spinner("Drafting claims from EVV visits…"):
             rows, failed = draft_rows(agency, end, rules_key())
-        workspaces["draft"] = new_workspace(rows, with_history=False, start=start, end=end, failed=failed)
+        workspaces["draft"] = new_workspace(rows, with_history=True, start=start, end=end, failed=failed)
         st.session_state.version += 1
 
     ws = workspaces.get("draft")
@@ -585,7 +585,7 @@ elif page == "Draft claims":
     ]
     st.markdown(
         f"**{len(in_range)} claims drafted** for dates of service {long_date(ws['start'].isoformat())} to "
-        f"{long_date(ws['end'].isoformat())}. Authorization balances include drafts for earlier dates."
+        f"{long_date(ws['end'].isoformat())}. Authorization balances include earlier paid claims and drafts predicted to be paid."
     )
     failed = [f for f in ws["failed"] if ws["start"] <= f[2] <= ws["end"]]
     duplicate_count = sum(reason.startswith(DUPLICATE_DRAFT_PREFIX) for _, _, _, reason in failed)
