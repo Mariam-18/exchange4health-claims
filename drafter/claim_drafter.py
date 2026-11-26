@@ -29,6 +29,7 @@ SERVICE_RATES = {
     "T1005": Decimal("4.80"),
 }
 DUPLICATE_DRAFT_PREFIX = "Duplicate: "
+PENDING_DRAFT_PREFIX = "Pending: "
 HARBOR_DAILY_CAP = 32
 READY = "ready to submit"
 NEEDS_REVIEW = "needs review"
@@ -60,11 +61,14 @@ class Decision:
     reduction_review: tuple
 
 
-def construct(data_dir, authorizations, verified_seconds, agencies, *, submitted_claims=()):
-    """Build drafts and report visit groups skipped, including matches to submitted claims."""
+def construct(data_dir, authorizations, verified_seconds, agencies, *, submitted_claims=(), pending_claims=()):
+    """Build drafts and report visit groups skipped, including matches to existing claims."""
     submitted_by_key = {}
     for claim in submitted_claims:
         submitted_by_key.setdefault(claim.duplicate_key, claim.claim_id)
+    pending_by_key = {}
+    for claim in pending_claims:
+        pending_by_key.setdefault(claim.duplicate_key, claim.claim_id)
 
     coverage = defaultdict(list)
     for auth_id, auth in authorizations.items():
@@ -118,6 +122,11 @@ def construct(data_dir, authorizations, verified_seconds, agencies, *, submitted
         prior_id = submitted_by_key.get((auth.payer, *key))
         if prior_id is not None:
             skipped.append((key, agency, f"{DUPLICATE_DRAFT_PREFIX}claim {prior_id} was already submitted"))
+            continue
+
+        pending_id = pending_by_key.get((auth.payer, *key))
+        if pending_id is not None:
+            skipped.append((key, agency, f"{PENDING_DRAFT_PREFIX}claim {pending_id} is already waiting to be submitted"))
             continue
 
         modifier = expected_modifier(auth.payer, service, service_date) or ""
