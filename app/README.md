@@ -167,7 +167,7 @@ Pick a period, by **date of service** or **submission date**. Agencies see their
 - **Data behind this answer** shows the tables it used.
 - It only reads, at a few cents a question.
 
-**Review with Claude:** Claude writes 3–5 highlights in plain English, e.g. "Already-paid claims are being billed again…". Each highlight has the statistics behind it underneath, followed by detailed findings (evidence, what it likely means, a suggestion, confidence, case studies). Every number is checked, the tool calls are listed, and **Add to investigation log** appends a finding to [docs/investigation_log.md](../docs/investigation_log.md).
+**Review with Claude:** Claude writes 3–5 highlights in plain English, e.g. "Already-paid claims are being billed again…". Each highlight has the statistics behind it underneath, followed by detailed findings (evidence, what it likely means, a suggestion, confidence, case studies). Every number is checked, the tool calls are listed, and **Add to investigation log** appends a finding to `investigation_log.md` in the app's state directory.
 
 > [insert screenshot: Highlighted by Claude]
 
@@ -290,7 +290,7 @@ Every result is saved, keyed on its inputs and the rules in force. Showing it ag
 
 The checker reads its dated payer rules (filing limits, Harbor's weekend modifier, Summit's whole hours) from [`checker/rule_settings.json`](../checker/rule_settings.json). Approved changes are written to the app's copy in `app_data/`, so the repository's settings, `predictions.csv` and the historical test never change.
 
-Design choices are recorded in [docs/DESIGN_DECISIONS.md](../docs/DESIGN_DECISIONS.md).
+See the [main README](../README.md#rules-ai-and-people) for the roles of Python, Claude, and agency staff.
 
 ## Saved data
 

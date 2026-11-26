@@ -34,7 +34,7 @@ flowchart LR
     end
 ```
 
-The checker reads the claim, the EVV visits, the authorizations and every earlier submission, then runs each payer's rules. Every failed rule is recorded with its evidence, a rule reference and a suggested action ([evidence format](docs/CLAIM_EVIDENCE.md)). When several rules fail, the payer's priority order picks the code the payer would report.
+The checker reads the claim, the EVV visits, the authorizations and every earlier submission, then runs each payer's rules. Every failed rule is recorded with its evidence, a rule reference and a suggested action ([checker output](checker/README.md#structured-output)). When several rules fail, the payer's priority order picks the code the payer would report.
 
 ## Rules, AI and people
 
@@ -83,6 +83,16 @@ Every claim list can be filtered by date of service, service, and patient, careg
 - **Costs:** about $0.01 per bulletin, $0.02 per investigation and $0.15 per report review, with prompt caching.
 
 **Drafter:** 4,980 drafts from verified EVV. 4,635 (93.1%) ready to submit, 345 (6.9%) held for review for authorization shortfalls and Harbor's daily cap. Payer outcomes for drafts are unknown, and 1,361 drafts (27.3%) have no matching claim in the history ([details](testing/README.md#claim-drafter-testing)).
+
+## Findings that shaped the workflow
+
+| Finding in the synthetic replay | How it shaped the app |
+|---|---|
+| **Units over verified time (D09).** 73.8% of gaps were under 30 minutes. Of those, 89.6% matched rounding up to a 15- or 30-minute boundary. | Offer a one-click recalculation using the payer's rules for small gaps. Ask the agency to reconcile larger gaps with the visit. |
+| **Harbor daily cap (D06).** 96 of 106 flags were one hour over the cap. Of those 96, 93 matched a single EVV visit, and none matched multiple visits. A break within the logged shift is one possible explanation. | Offer a reduction for a single nine-hour claim with no other counted units that day. Recording non-billable breaks in EVV would let agencies address this at the source. |
+| **Missing or invalid authorization (D07/D08).** All 84 missing IDs and 80 invalid IDs in the replay had exactly one valid match for the payer, patient, service, and date. | Offer the matching ID and recheck the available balance before marking the claim ready. |
+
+Other tests helped rule out automatic fixes. Of 103 claims with no matching visit, only three had an unclaimed alternate-date candidate with compatible units within a week after checking both exports. All three came from the same block of unclaimed visit records. Caregiver changes near the missing dates were just as common in paid cases. The app asks someone to resolve missing visit evidence before changing a claim date.
 
 ## How to run
 
@@ -139,10 +149,7 @@ Command line:
 - **Dates.** Filing limits and modifier rules are chosen by date of service. Claims submitted on the same date are processed in their row order within each file.
 - **Authorization use.** Units are drawn down by paid claims in submission order. Pending claims predicted to be paid count against later ones.
 - **Agencies.** Each patient belongs to one agency, as in the history. The EVV export has no agency.
-- **Billed amounts.** The prototype calculates billed amounts for drafts and unit edits using per-unit charges inferred from the synthetic claims history: T1019 $6.10, S5125 $5.40, and T1005 $4.80. These charges do not affect the checker’s predictions.
 - **Drafts.** A draft is submitted the day after the visit's last clock-out, so it's never late.
-
-Changes to the checker's decision logic are logged in [LOGIC_CHANGES.md](docs/LOGIC_CHANGES.md).
 
 ## Next steps
 
@@ -157,16 +164,12 @@ Changes to the checker's decision logic are logged in [LOGIC_CHANGES.md](docs/LO
 
 | Path | What it is |
 |---|---|
-| [app/](app/README.md) | The Streamlit app, with a walkthrough and screenshots: claim review (`review.py`), alerts (`rules_admin.py`, `monitoring.py`), reports (`stats.py`), analysis tools (`analysis.py`) and Claude calls (`ai.py`) |
+| [app/](app/README.md) | The Streamlit app, with a walkthrough of claim review (`review.py`), alerts (`rules_admin.py`, `monitoring.py`), reports (`stats.py`), analysis tools (`analysis.py`) and Claude calls (`ai.py`) |
 | [checker/](checker/README.md) | Rules-based claim checker, with plain-language flowcharts |
 | [drafter/](drafter/README.md) | Builds claims from verified EVV and checks them |
 | [testing/](testing/README.md) | Historical test and drafter results |
-| [docs/INVESTIGATION.md](docs/INVESTIGATION.md) | What the denials showed, and hypotheses tested |
-| [docs/CLAIM_EVIDENCE.md](docs/CLAIM_EVIDENCE.md) | The checker's per-claim evidence format |
-| [docs/LOGIC_CHANGES.md](docs/LOGIC_CHANGES.md) | Log of changes to the decision logic |
-| [docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md) | Choices made for roles, alerts and reports |
 | [checker/rule_settings.json](checker/rule_settings.json) | Dated payer rules the AI can propose changes to |
 
 ## How I worked with AI
 
-*[To write: ChatGPT for the data analysis and the first checker and drafter; Claude Code for the app, testing and this README; where each helped, where it went wrong, and how I checked its work.]*
+I used ChatGPT to explore the claims data and build the first checker and drafter, then Claude Code to build the Streamlit app and extend the prototype. I checked the rules against the supplied manuals and bulletins, replayed the historical claims to compare with payer outcomes, and tested the AI workflows on known and unfamiliar rules.

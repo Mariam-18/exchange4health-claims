@@ -10,14 +10,14 @@ import pandas as pd
 import streamlit as st
 
 from app import ai
-from app.activity import now
+from app.activity import STATE_DIR, now
 from app.stats import STAT_TITLES, compute, in_period
 from app.ui_common import ask_box
 
 PRIMARY = "#1f4e79"
 ROOT = Path(__file__).resolve().parents[1]
-INVESTIGATION_DOC = ROOT / "docs" / "INVESTIGATION.md"
-INVESTIGATION_LOG = ROOT / "docs" / "investigation_log.md"
+PROJECT_README = ROOT / "README.md"
+INVESTIGATION_LOG = STATE_DIR / "investigation_log.md"
 FIRST, LAST = date(2026, 6, 1), date(2027, 2, 28)
 
 
@@ -229,7 +229,11 @@ def claude_review(data_dir, frame, s, field, start, end, agency):
                     "tools, and traces case studies. Every number it states is checked against the data.")
         return None
     part = in_period(frame, field, start, end, agency)
-    known = "\n\n".join(p.read_text(encoding="utf-8") for p in (INVESTIGATION_DOC, INVESTIGATION_LOG) if p.exists())
+    findings = PROJECT_README.read_text(encoding="utf-8").partition(
+        "## Findings that shaped the workflow\n"
+    )[2].partition("\n## ")[0].strip()
+    saved = INVESTIGATION_LOG.read_text(encoding="utf-8") if INVESTIGATION_LOG.exists() else ""
+    known = "\n\n".join(filter(None, (findings, saved)))
     try:
         with st.spinner("Claude is reviewing the statistics and exploring the claims…"):
             out = ai.review_report(scope, s, known, data_dir, part, refresh=st.session_state[key] == "refresh")
@@ -263,7 +267,7 @@ def claude_review(data_dir, frame, s, field, start, end, agency):
                 st.markdown("Case studies: " + md(", ".join(finding["case_studies"])))
             if st.button("Add to investigation log", key=f"log_{key}_{n}"):
                 append_finding(scope, finding)
-                st.success("Added to docs/investigation_log.md.")
+                st.success("Added to the investigation log.")
     with st.expander("How Claude worked this out"):
         for n, call in enumerate(out["tool_calls"], 1):
             st.markdown(f"**{n}. {call['name']}** `{call['input']}`")
@@ -273,6 +277,7 @@ def claude_review(data_dir, frame, s, field, start, end, agency):
 
 def append_finding(scope: str, finding: dict) -> None:
     """Append an approved finding to the investigation log."""
+    INVESTIGATION_LOG.parent.mkdir(parents=True, exist_ok=True)
     new_file = not INVESTIGATION_LOG.exists()
     with INVESTIGATION_LOG.open("a", encoding="utf-8") as stream:
         if new_file:

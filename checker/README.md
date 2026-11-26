@@ -2,7 +2,7 @@
 
 The checker evaluates existing claims against verified visits, authorizations, submission history, and payer rules. Each applicable check runs, and the payer’s priority determines the predicted denial code.
 
-These diagrams show the target workflow. The replay sorts by submission date and assumes earlier rows in the same CSV were submitted first when dates tie. Same-date claims from the other CSV can trigger review when their sequence matters. The [claim evidence contract](../docs/CLAIM_EVIDENCE.md) describes the structured JSON output.
+These diagrams show the target workflow. The replay sorts by submission date and assumes earlier rows in the same CSV were submitted first when dates tie. Same-date claims from the other CSV can trigger review when their sequence matters. The [structured output](#structured-output) supplies the evidence used by the app.
 
 For the runnable historical evaluation, see the [testing guide](../testing/README.md).
 
@@ -156,3 +156,25 @@ S(["From the payer checks"]) --> F["Sort the complete set of failed codes by con
     Q2 -->|Yes| R
     Q2 -->|No| O(["Ready to submit"])
 ```
+
+## Structured output
+
+```python
+from pathlib import Path
+from checker.claim_checker import predict_pending_assessments
+
+claims = predict_pending_assessments(Path("/path/to/data"))
+```
+
+For a CLI integration, run from the repository root:
+
+```bash
+python -m checker.claim_checker /path/to/data \
+  --audit history_audit.csv --predictions predictions.csv --details findings.json
+```
+
+The JSON array follows `claims_to_check.csv` row order. Each item has `claim_id`, `payer`, `service_code`, `service_date`, `submission_date`, `status`, `predicted_denial_code`, `failed_checks`, `finding_details`, and `review_reasons`. Dates are ISO strings. Every failed code has one object with `evidence`, a `rule_reference` string, and a `suggested_action` key.
+
+- Use `status` for the queue. Values are `ready_to_submit` and `needs_review`. A review-only item has an empty `failed_checks` list and a null `predicted_denial_code`.
+- Render all findings in `failed_checks` order. The first code is the predicted denial code. The assessment CSV has separate `paid` and `denied` predictions, with only `claim_id,status,denial_code`.
+- Use top-level service and submission dates for the current claim. Dates inside evidence refer to deadlines, prior submissions, or authorization coverage.
