@@ -54,6 +54,12 @@ Claude helps scale this approach as payer rules change. It translates a bulletin
 - I tested the checker's predictions against recorded payer outcomes in the [claims history](testing/README.md#baseline-results). I also traced a couple of denials through the underlying records to check that the reasons made sense.
 - I decided where the checker and drafter fit in the billing workflow, what agency staff should see and do, and how the interface should look and work. I used AI to turn that design into the working demo.
 
+## Assumptions
+
+- Payer rules can be translated into explicit checks and stay in force long enough to reuse.
+- Exchange4Health has a complete view of the billing workflow it supports. The checker and drafter need access to verified visits, authorizations, pending claims, and submitted claims. Agencies can provide that by moving billing into Exchange4Health or connecting their existing systems.
+- Verified EVV is the source of truth. This is a reasonable assumption due to the highly regulated nature of the industry.
+
 ## Open the demo
 
 From the repository root, with Python 3.9 or later:
