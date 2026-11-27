@@ -91,8 +91,13 @@ Start(["From visit evidence or billed units"]) --> A
     B -->|No| BS{"Would approval of earlier pending submissions against this authorization make this claim exceed the balance?"}
     BS -->|Yes| BR["Record review: pending authorization usage"]
     BS -->|No| Next
-    D7 --> Next
-    D8 --> Next
+    D7 --> C
+    D8 --> C
+    C{"Does exactly one authorization cover the same payer, patient, service and date of care?"}
+    C -->|Yes| Fix["Suggest adding the matching ID for D07 or replacing it for D08"]
+    C -->|No| Review["Ask the agency to resolve the authorization match"]
+    Fix --> Next
+    Review --> Next
     D2 --> Next
     BR --> Next
     Next(["Continue to the payer branch"])
