@@ -18,7 +18,7 @@ For the runnable historical evaluation, see the [testing guide](../testing/READM
 ```mermaid
 flowchart TD
 S(["Start"]) --> P{"Known payer?"}
-    P -->|No| U(["Needs review: unknown payer"])
+    P -->|No| U(["Output error: Payer unknown"])
     P -->|Yes| K{"Is this a corrected claim (frequency_code = 7)?"}
     K -->|Yes| O{"Was the referenced original claim submitted earlier?"}
     O -->|No| OR["Record review: original claim unavailable"]
