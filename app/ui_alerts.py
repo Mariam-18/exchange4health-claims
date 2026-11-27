@@ -142,7 +142,7 @@ def rule_detail(change: dict) -> str:
 
 
 def approval_block(data_dir, rules, change, agencies, key, title) -> bool:
-    """Display a proposed rule and preview the pending claims it affects."""
+    """Display a proposed rule and the number of agencies whose pending claims it affects."""
     st.markdown("#### Proposed rule")
     st.markdown(f"**Applies to**  {rules_admin.PAYERS[change['payer']]}  \n"
                 f"**Rule**  {RULE_LABELS[change['rule_type']]}  \n"
@@ -185,13 +185,8 @@ def approval_block(data_dir, rules, change, agencies, key, title) -> bool:
         st.code(json.dumps(proposal, indent=2), language="json")
 
     impact = cached_impact(data_dir, rules, final, agencies)
-    pending = impact["pending_changes"]
-    st.markdown(f"**Pending claims affected**  {len(pending):,}")
-    if pending:
-        with st.expander("View affected claims"):
-            st.dataframe(pd.DataFrame(pending).rename(columns={
-                "claim_id": "Claim", "agency": "Agency", "before": "Before", "after": "After",
-            }), hide_index=True, width="stretch")
+    affected_agencies = sum(bool(agency) and count > 0 for agency, count in impact["pending_by_agency"].items())
+    st.metric("Agencies affected", affected_agencies)
     if st.button("Approve rule change", key=f"approve_{key}", type="primary"):
         rules_admin.approve("bulletin", title, final, impact, data_dir=data_dir)
         return True
